@@ -48,10 +48,37 @@ MSRV validation is a separate compatibility gate:
 
 ```sh
 rustup toolchain install 1.85.0 --profile minimal
-RUSTC="$(rustup which --toolchain 1.85.0 rustc)" "$(rustup which --toolchain 1.85.0 cargo)" check --locked --workspace --all-targets --all-features
+RUSTUP_TOOLCHAIN=1.85.0 cargo check --locked --workspace --all-targets --all-features
 ```
 
 The disposable worker/Wasm build experiment and its exact CLI pins are documented in [`benchmarks/wasm/toolchain-spike`](benchmarks/wasm/toolchain-spike). It is deliberately excluded from the product Cargo workspace.
+
+Changes to capture import, the Wasm adapter, or the worker protocol must also run the production boundary harness:
+
+```sh
+nvm use
+cd benchmarks/wasm/boundary-harness
+corepack pnpm install --frozen-lockfile
+corepack pnpm run tools:install
+corepack pnpm verify
+corepack pnpm evidence
+```
+
+`verify` builds the product Wasm with direct Cargo plus the exact pinned `wasm-bindgen`, validates the binary-only transport contract, builds the production module worker, and runs the behavioral suite in Chromium and Firefox. `evidence` regenerates the committed [boundary measurements](benchmarks/wasm/boundary-harness/EVIDENCE.md) from synthetic in-memory fixtures; never substitute a private capture.
+
+Parser robustness changes must run the deterministic property suite and replay the committed synthetic fuzz corpus:
+
+```sh
+cargo test --locked -p packet-core --test import_properties
+FUZZ_NIGHTLY=nightly-2026-07-20
+rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
+cargo +"$FUZZ_NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
+for seed in fuzz/corpus/capture_import/*; do
+  cargo +"$FUZZ_NIGHTLY" fuzz run capture_import "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
+done
+```
+
+The weekly workflow uses the same pinned fuzz toolchain for a ten-minute mutation campaign. Local longer runs can use `cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- -max_total_time=600 -max_len=4096 -timeout=2 -rss_limit_mb=1024`. Keep corpus additions small and synthetic, and record their provenance and intent in [`fixtures/manifests`](fixtures/manifests).
 
 ## Changes and review
 

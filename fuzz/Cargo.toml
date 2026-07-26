@@ -1,0 +1,23 @@
+[package]
+name = "wirelens-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+packet-core = { path = "../crates/packet-core" }
+
+[[bin]]
+name = "capture_import"
+path = "fuzz_targets/capture_import.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

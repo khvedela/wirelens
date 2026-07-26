@@ -8,12 +8,17 @@
 
 mod diagnostic;
 mod field;
+mod import;
 mod model;
 mod range;
 mod timestamp;
 
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Severity};
 pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
+pub use import::{
+    CaptureImporter, ImportError, ImportLimitKind, ImportLimits, ImportProgress, ImportStep,
+    decoder_scratch_bytes_upper_bound,
+};
 pub use model::{
     ByteOrder, CaptureDataset, CaptureDatasetParts, CaptureFormat, CaptureMetadata, InterfaceId,
     InterfaceMetadata, LinkType, ModelError, PacketId, PacketRecord, SectionId, SectionMetadata,

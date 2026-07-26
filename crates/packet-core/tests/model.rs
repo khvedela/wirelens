@@ -65,6 +65,29 @@ fn single_packet_parts(timestamp: Option<CaptureTimestamp>) -> CaptureDatasetPar
 }
 
 #[test]
+fn retained_index_bytes_excludes_capture_and_counts_exact_arenas() {
+    let mut parts = single_packet_parts(None);
+    parts.interfaces[0].name = Some(StringId(0));
+    parts.strings = vec![Box::from("interface-zero")].into_boxed_slice();
+    let capture_bytes = parts.bytes.len();
+    let dataset = CaptureDataset::from_parts(parts).expect("valid named-interface dataset");
+
+    let expected = size_of::<SectionMetadata>()
+        + size_of::<InterfaceMetadata>()
+        + size_of::<PacketRecord>()
+        + size_of::<Box<str>>()
+        + "interface-zero".len();
+    assert_eq!(
+        dataset.retained_index_bytes(),
+        Some(u64::try_from(expected).expect("test allocation fits u64"))
+    );
+    assert_eq!(dataset.bytes().len(), capture_bytes);
+    assert_eq!(dataset.interned_string_count(), 1);
+    assert_eq!(dataset.interned_string_bytes(), Some(14));
+    assert_ne!(dataset.retained_index_bytes(), Some(capture_bytes as u64));
+}
+
+#[test]
 fn byte_ranges_are_half_open_checked_and_nestable() {
     let packet = range(100, 64);
     assert_eq!(packet.end(), 164);

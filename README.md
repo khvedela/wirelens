@@ -4,7 +4,7 @@
 
 **Inspect PCAP files locally, reconstruct network flows, and understand protocol behavior through a modern interactive interface.**
 
-> **Status:** foundational implementation is underway. WireLens is not yet a usable packet analyzer.
+> **Status:** the capture model, bounded PCAP/PCAPNG importer, and production Wasm boundary are implemented. The user-facing importer and investigation interface are still under construction, so WireLens is not yet a usable packet analyzer.
 
 ## The problem
 
@@ -16,7 +16,7 @@ WireLens will be a privacy-first network investigation application for networkin
 
 ## Why Rust and WebAssembly
 
-Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. WireLens is designed to compile a platform-neutral Rust analysis core to WebAssembly and run expensive browser work in a Web Worker. Accepted architecture decisions define crate ownership, browser boundaries, the capture-framing library, canonical model, and reproducible worker/Wasm build contract; implementation performance remains evidence-driven.
+Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. WireLens compiles its platform-neutral capture core to WebAssembly and runs it in a module Web Worker. Accepted architecture decisions define crate ownership, browser boundaries, the capture-framing library, canonical model, and reproducible worker/Wasm build contract. The current boundary’s throughput, memory, cancellation, transfer, and cleanup measurements are recorded in the [Wasm boundary evidence](benchmarks/wasm/boundary-harness/EVIDENCE.md).
 
 ## Privacy first
 
@@ -34,6 +34,13 @@ Packet data can contain credentials, identifiers, private conversations, and pro
 - Privacy-preserving offline operation
 - A later native Rust live-capture agent
 - Optional future Aya/eBPF-based Linux observability, where justified
+
+## Implemented foundations
+
+- A platform-neutral, bounded PCAP/PCAPNG importer that treats captures as hostile input and preserves exact source evidence.
+- An immutable canonical capture/packet model with exact timestamps, byte ranges, diagnostics, sections, and interfaces.
+- A versioned, generational-handle Wasm API with cooperative cancellation, monotonic progress, deterministic cleanup, structured warnings/errors, and bounded binary packet batches.
+- A production module-worker harness that blocks external traffic and verifies detached binary transfers in Chromium and Firefox CI.
 
 ## Accepted v0.1 architecture
 

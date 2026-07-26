@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/packet-core"]
+members = ["crates/packet-core", "crates/wasm-adapter"]
 exclude = [
     "benchmarks/parser/library-spike",
     "benchmarks/wasm/toolchain-spike",
