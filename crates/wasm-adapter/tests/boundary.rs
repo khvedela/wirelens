@@ -151,7 +151,10 @@ fn synthetic_pcap(payloads: &[&[u8]]) -> Box<[u8]> {
     bytes.extend_from_slice(&0_i32.to_le_bytes());
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes.extend_from_slice(&65_535_u32.to_le_bytes());
-    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    // Generic boundary tests intentionally use LINKTYPE_USER0. Protocol-specific
+    // tests build explicit Ethernet captures instead of treating arbitrary test
+    // payload bytes as an Ethernet frame.
+    bytes.extend_from_slice(&147_u32.to_le_bytes());
     for (index, payload) in payloads.iter().enumerate() {
         let length = u32::try_from(payload.len()).expect("synthetic payload length fits u32");
         bytes.extend_from_slice(
@@ -167,6 +170,12 @@ fn synthetic_pcap(payloads: &[&[u8]]) -> Box<[u8]> {
     bytes.into_boxed_slice()
 }
 
+fn synthetic_ethernet_pcap(payloads: &[&[u8]]) -> Box<[u8]> {
+    let mut bytes = synthetic_pcap(payloads).into_vec();
+    bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    bytes.into_boxed_slice()
+}
+
 fn dense_empty_pcap(packet_count: u32) -> Box<[u8]> {
     let mut bytes = Vec::with_capacity(24 + packet_count as usize * 16);
     bytes.extend_from_slice(&[0xd4, 0xc3, 0xb2, 0xa1]);
@@ -175,7 +184,7 @@ fn dense_empty_pcap(packet_count: u32) -> Box<[u8]> {
     bytes.extend_from_slice(&0_i32.to_le_bytes());
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes.extend_from_slice(&65_535_u32.to_le_bytes());
-    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&147_u32.to_le_bytes());
     for index in 0..packet_count {
         bytes.extend_from_slice(&index.to_le_bytes());
         bytes.extend_from_slice(&0_u32.to_le_bytes());
@@ -569,6 +578,35 @@ fn truncated_capture_finishes_with_bounded_diagnostics_instead_of_panicking() {
         "capture ended before the declared record length"
     );
     assert_eq!(state.dataset_diagnostic(published.dataset, 1), Ok(None));
+}
+
+#[test]
+fn production_import_path_invokes_the_link_layer_decoder() {
+    let mut state = BoundaryState::new();
+    let import = state
+        .begin_import(synthetic_ethernet_pcap(&[&[0; 10]]))
+        .expect("bounded truncated Ethernet fixture begins importing");
+    let ready = advance_until_ready(&mut state, import);
+    assert_eq!(ready.packets_retained, 1);
+    assert_eq!(ready.diagnostics, 1);
+
+    let published = state
+        .finish_import(import)
+        .expect("packet-scoped decode warning remains publishable");
+    let diagnostic = state
+        .dataset_diagnostic(published.dataset, 0)
+        .expect("diagnostic query succeeds")
+        .expect("truncated Ethernet warning exists");
+    assert_eq!(
+        diagnostic.diagnostic.code,
+        DiagnosticCode::TRUNCATED_PROTOCOL
+    );
+    assert_eq!(
+        diagnostic.diagnostic.scope,
+        DiagnosticScope::Packet(PacketId(0))
+    );
+    assert_eq!(diagnostic.diagnostic.recovery, Recovery::Continued);
+    assert_eq!(diagnostic.diagnostic.byte_range, Some(range(40, 10)));
 }
 
 #[test]

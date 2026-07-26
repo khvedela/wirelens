@@ -43,6 +43,10 @@ const markdown = `# Wasm boundary evidence
 
 Recorded ${evidence.recordedAt} in ${evidence.browserName}. The browser reported \`${evidence.environment.userAgent}\` and ${evidence.environment.hardwareConcurrency} logical processors. Fixtures are deterministic, generated in memory, and contain no captured private traffic.
 
+> This is supported-boundary workload evidence below 500 MB. It does not satisfy or redefine
+> ADR-0001's successful \`>=500 MB\` large-capture criterion; ADR-0008 and issue #55 keep that
+> product-level L2/T1/M1 decision open.
+
 This report is emitted only after the exact toolchain check, direct Cargo + \`wasm-bindgen\` production build, static binary-transport/API-signature contract check, TypeScript check, production bundle, and all assertions below pass.
 
 ## Acceptance measurements
@@ -67,7 +71,7 @@ This report is emitted only after the exact toolchain check, direct Cargo + \`wa
 | Queued-cancellation Wasm high-water growth | ${formatBytes(cancellationWasmGrowth)} | 0 bytes |
 | Fatal resource-limit Wasm high-water growth | ${formatBytes(failureWasmGrowth)} | 0 bytes |
 
-The dense fixture contains ${evidence.dense.records.toLocaleString("en-US")} short records in ${formatBytes(evidence.dense.captureBytes)}. Its proportional admission ceiling was ${evidence.dense.admittedPackets.toLocaleString("en-US")} packets. The sparse fixture contains ${evidence.sparse.records.toLocaleString("en-US")} large records in ${formatBytes(evidence.sparse.captureBytes)}. Both passed through an explicit \`validating\` checkpoint before a later call atomically published the dataset.
+The dense fixture contains ${evidence.dense.records.toLocaleString("en-US")} near-MTU Ethernet records with ${evidence.dense.payloadBytes.toLocaleString("en-US")} authored payload bytes each, totaling ${formatBytes(evidence.dense.captureBytes)}. Its proportional admission ceiling was ${evidence.dense.admittedPackets.toLocaleString("en-US")} packets. The sparse fixture contains ${evidence.sparse.records.toLocaleString("en-US")} large records in ${formatBytes(evidence.sparse.captureBytes)}. Both passed through an explicit \`validating\` checkpoint before a later call atomically published the dataset.
 
 The ${formatBytes(evidence.hostileOptions.captureBytes)} PCAPNG hostile fixture contains ${evidence.hostileOptions.decodedItems.toLocaleString("en-US")} individually valid options across 513 blocks. Twelve calls each made monotonic byte progress while the cumulative ${evidence.capabilities.maxDecodedItemsPerStep.toLocaleString("en-US")}-item work checkpoint prevented decoding the remaining tail in one worker task; cancellation then returned the boundary to its exact baseline.
 

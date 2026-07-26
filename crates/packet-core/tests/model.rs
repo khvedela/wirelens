@@ -84,6 +84,10 @@ fn retained_index_bytes_excludes_capture_and_counts_exact_arenas() {
     assert_eq!(dataset.bytes().len(), capture_bytes);
     assert_eq!(dataset.interned_string_count(), 1);
     assert_eq!(dataset.interned_string_bytes(), Some(14));
+    assert_eq!(
+        dataset.retained_packet_index_bytes(),
+        Some(u64::try_from(size_of::<PacketRecord>()).expect("packet arena fits u64"))
+    );
     assert_ne!(dataset.retained_index_bytes(), Some(capture_bytes as u64));
 }
 

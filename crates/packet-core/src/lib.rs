@@ -17,7 +17,7 @@ pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Seve
 pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
 pub use import::{
     CaptureImporter, ImportError, ImportLimitKind, ImportLimits, ImportProgress, ImportStep,
-    decoder_scratch_bytes_upper_bound,
+    PacketDecodeInput, PacketDecodeSink, PacketDecoder, decoder_scratch_bytes_upper_bound,
 };
 pub use model::{
     ByteOrder, CaptureDataset, CaptureDatasetParts, CaptureFormat, CaptureMetadata, InterfaceId,

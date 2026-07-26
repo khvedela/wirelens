@@ -49,6 +49,12 @@ shell omits the Performance Manager instrumentation behind that API. The harness
 documented eager-measurement test mode to remove the randomized garbage-collection delay without
 substituting a different memory source.
 
+The decoder-aware dense reference uses 60,000 near-MTU Ethernet records (about 84 MiB) so the
+configured parser, canonical arenas, and maximum binary output can all coexist inside the 2.5x
+supported-path envelope. This is not evidence for ADR-0001's successful `>=500 MB` criterion;
+[ADR-0008](../../../docs/architecture/adr-0008-large-capture-criterion.md) and
+[issue #55](https://github.com/khvedela/wirelens/issues/55) keep that product-level decision open.
+
 The exact generated `wasm-bindgen` exports and the version-1 worker operation set are recorded in
 the reviewed [`API.md`](API.md) snapshot. The contract verifier compares each production-generated
 TypeScript declaration with that snapshot before browser tests run.

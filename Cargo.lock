@@ -143,6 +143,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol-decoders"
+version = "0.1.0"
+dependencies = [
+ "packet-core",
+ "proptest",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "packet-core",
+ "protocol-decoders",
  "wasm-bindgen",
 ]
 

@@ -21,6 +21,12 @@ fn property_limits() -> ImportLimits {
         max_sections: 16,
         max_interfaces: 32,
         max_diagnostics: 32,
+        max_layers: 512,
+        max_layers_per_packet: 8,
+        max_fields: 2_048,
+        max_fields_per_packet: 32,
+        max_field_children: 2_048,
+        max_field_children_per_packet: 64,
         max_string_bytes: 4_096,
     }
 }

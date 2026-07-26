@@ -110,6 +110,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol-decoders"
+version = "0.1.0"
+dependencies = [
+ "packet-core",
+]
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -145,6 +152,7 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "packet-core",
+ "protocol-decoders",
 ]
 
 [[package]]

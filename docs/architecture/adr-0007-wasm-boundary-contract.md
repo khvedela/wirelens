@@ -174,13 +174,20 @@ The command capability query is the source of truth for the current build. API v
 | Decoded PCAPNG options/list items per block / cumulative step | 4,096 / 4,096 |
 | Packets | `min(131,072, 1,024 + floor(capture_bytes / 256))` |
 | Sections / interfaces | 1,024 / 16,384 |
+| Decoded layers, global / per packet / base / density allowance | 393,216 / 32 / 4,096 / one per 250 capture bytes |
+| Decoded fields, global / per packet / base / density allowance | 1,048,576 / 1,024 / 25,600 / one per 63 capture bytes |
+| Field-child references, global / per packet / base / density allowance | 1,048,576 / 2,048 / 21,504 / one per 84 capture bytes |
 | Diagnostics / interned safe text | 1,024 / 256 KiB |
 | Import handles / dataset handles / packet cursors | 16 / 1,024 / 65,536 |
 | One import step | 4,096 records and 16 MiB |
 | One packet batch | 65,536 rows and 8 MiB |
 | One evidence read | 1 MiB |
 
-Pre-copy admission checks handle capacity, total owned capture bytes, proportional packet capacity, and the conservative logical-memory ceiling before allocating the Rust input. The logical ceiling includes the parser circular buffer's spare-capacity/sentinel allowance, geometric packet-arena capacity, decoded option/name-record scratch, and bounded finalization state. A cumulative decoded-item checkpoint prevents many individually valid PCAPNG blocks from turning one step into unbounded option/list work. Runtime resource statistics distinguish current retained/reserved bytes from lifetime high-water counters. One validating checkpoint separates parser completion from atomic publication, and the worker applies transactional single-flight acknowledgement backpressure to packet-batch and evidence transfers.
+Pre-copy admission checks handle capacity, total owned capture bytes, proportional packet capacity, decoded layer/field/child arenas, and the conservative logical-memory ceiling before allocating the Rust input. Each decoded-arena total is `min(requested total, global total, max(arena base, ceil(capture bytes / density allowance)))`. The arena bases are the 1,024-packet small-capture allowance multiplied by the link decoder's tested worst structured output (4 layers, 25 fields, and 21 child references per packet), so every packet in that fixed allowance can take the largest current decode path. Above the base, captures with exceptionally dense decoded facts fail closed with a structured resource limit; the active packet decode is rolled back, the importer is reclaimed, and no incomplete dataset is published. Partial decode coverage is not representable in the canonical model and therefore must not be implied by empty layer spans. Fixed-width canonical arenas select geometric growth targets clamped to their configured totals and transfer those allocations into the immutable dataset without a final copy. The logical ceiling separately includes the parser circular buffer's spare-capacity/sentinel allowance, decoded option/name-record scratch, protocol-tree validation scratch, decoder vocabulary, and bounded string finalization state. A cumulative decoded-item checkpoint prevents many individually valid PCAPNG blocks from turning one step into unbounded option/list work. Runtime resource statistics distinguish current retained/reserved bytes from lifetime high-water counters. One validating checkpoint separates parser completion from atomic publication, and the worker applies transactional single-flight acknowledgement backpressure to packet-batch and evidence transfers.
+
+The decoded-arena capability fields are additive optional metadata within command API v1. Current
+builds advertise and validate them, while a v1 consumer tolerates their absence when paired with an
+older v1 module and does not infer decoded-arena limits that were not advertised.
 
 ## Scope split between issues #9 and #10
 

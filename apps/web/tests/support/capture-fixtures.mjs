@@ -89,8 +89,9 @@ function recipeDigest(recipe) {
   return createHash("sha256").update(JSON.stringify(recipe)).digest("hex");
 }
 
-export function encodePcapGlobalHeader(variantId = "little-microseconds") {
+export function encodePcapGlobalHeader(variantId = "little-microseconds", linkType = 1) {
   const variant = variantById(variantId);
+  assertSafeInteger(linkType, "linkType", 0, 0xffff_ffff);
   const bytes = new Uint8Array(PCAP_GLOBAL_HEADER_BYTES);
   bytes.set(variant.magic, 0);
   const view = new DataView(bytes.buffer);
@@ -99,7 +100,7 @@ export function encodePcapGlobalHeader(variantId = "little-microseconds") {
   setU32(view, 8, 0, variant.endian);
   setU32(view, 12, 0, variant.endian);
   setU32(view, 16, 65_535, variant.endian);
-  setU32(view, 20, 1, variant.endian);
+  setU32(view, 20, linkType, variant.endian);
   return bytes;
 }
 
@@ -128,7 +129,7 @@ function syntheticEthernetPayload(byteLength) {
   bytes.fill(0x42);
   if (byteLength >= ETHERNET_HEADER_BYTES) {
     bytes.set(
-      [0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x00],
+      [0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x02, 0x88, 0xb5],
       0,
     );
   }
@@ -376,6 +377,10 @@ export async function writeSparseArchitectureOversizePcap(
 
 export function createHostileFixtureBytes() {
   const littleHeader = encodePcapGlobalHeader("little-microseconds");
+  // The dense admission fixture intentionally contains zero-length records.
+  // LINKTYPE_USER0 keeps it focused on packet-count admission instead of
+  // manufacturing thousands of truncated-Ethernet diagnostics.
+  const denseHeader = encodePcapGlobalHeader("little-microseconds", 147);
   const truncatedRecordHeader = encodePcapRecordHeader({
     capturedLength: 128,
     endian: "little",
@@ -427,7 +432,7 @@ export function createHostileFixtureBytes() {
   randomMagic.set([0xde, 0xad, 0xbe, 0xef], 0);
 
   return Object.freeze({
-    "dense-packet-admission.pcap": concatBytes(littleHeader, denseRecords),
+    "dense-packet-admission.pcap": concatBytes(denseHeader, denseRecords),
     "empty.capture": new Uint8Array(),
     "malformed-pcapng-bom.pcapng": malformedBom,
     "malformed-pcapng-footer.pcapng": malformedFooter,
@@ -592,7 +597,7 @@ export async function generateBrowserIngestionFixtures({
   const hostileIntent = {
     "dense-packet-admission.pcap": [
       "resource_limit",
-      "Exceed proportional packet admission with zero-length records",
+      "Exceed proportional packet admission with zero-length LINKTYPE_USER0 records",
     ],
     "empty.capture": [
       "structured_rejection",

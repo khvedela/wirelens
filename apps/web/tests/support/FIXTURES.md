@@ -6,7 +6,8 @@ Repository-level provenance is recorded in
 All fixtures produced by this support package are authored synthetic data. They contain no observed,
 private, proprietary, or third-party network traffic. The only repeated payload content is the byte
 `0x42`, preceded where space permits by two locally administered synthetic Ethernet addresses and an
-IPv4 EtherType. The fixtures are covered by the repository's MIT license.
+intentionally unsupported authored EtherType `0x88b5`. Protocol correctness uses separate valid
+frames. The fixtures are covered by the repository's MIT license.
 
 - **Created:** 2026-07-26
 - **Source:** WireLens-authored deterministic generator in this directory

@@ -46,6 +46,13 @@ export interface BoundaryWarning {
 export interface Capabilities {
   apiVersion: number;
   batchSchemaVersion: number;
+  decodedArenaAdmissionRule?: string;
+  decodedFieldAdmissionBase?: number;
+  decodedFieldAdmissionBytesPerItem?: number;
+  decodedLayerAdmissionBase?: number;
+  decodedLayerAdmissionBytesPerItem?: number;
+  fieldChildAdmissionBase?: number;
+  fieldChildAdmissionBytesPerItem?: number;
   maxBlockBytes: number;
   maxCaptureBytes: number;
   maxDatasetHandles: number;
@@ -53,11 +60,17 @@ export interface Capabilities {
   maxDecodedItemsPerStep: number;
   maxDiagnostics: number;
   maxEvidenceBytes: number;
+  maxFieldChildren?: number;
+  maxFieldChildrenPerPacket?: number;
+  maxFields?: number;
+  maxFieldsPerPacket?: number;
   maxImportHandles: number;
   maxImportStepBytes: number;
   maxImportStepRecords: number;
   maxInterfaces: number;
   maxInternedStringBytes: number;
+  maxLayers?: number;
+  maxLayersPerPacket?: number;
   maxPackets: number;
   maxPacketBatchBytes: number;
   maxPacketBatchRows: number;

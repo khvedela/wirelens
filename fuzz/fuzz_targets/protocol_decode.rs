@@ -1,7 +1,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use packet_core::{CaptureImporter, ImportLimits, ImportProgress, ImportStep};
+use packet_core::{CaptureDataset, CaptureImporter, ImportLimits, ImportProgress, ImportStep};
+use protocol_decoders::LinkLayerDecoder;
 
 const HEX_PREFIX: &[u8] = b"hex:";
 const MAX_CAPTURE_BYTES: usize = 4_096;
@@ -11,19 +12,24 @@ const STEP_RECORD_BUDGET: u32 = 4;
 const INITIAL_STEP_BYTE_BUDGET: u64 = 31;
 
 fn fuzz_limits() -> ImportLimits {
-    ImportLimits {
-        max_capture_bytes: u64::try_from(MAX_CAPTURE_BYTES)
-            .expect("the fuzz input bound fits in u64"),
-        max_block_bytes: 1_024,
-        max_decoded_items_per_block: 64,
-        max_decoded_items_per_step: 64,
-        max_packets: 256,
-        max_sections: 32,
-        max_interfaces: 64,
-        max_diagnostics: 64,
-        max_string_bytes: 4_096,
-        ..ImportLimits::default()
-    }
+    let mut limits = ImportLimits::default();
+    limits.max_capture_bytes =
+        u64::try_from(MAX_CAPTURE_BYTES).expect("the fuzz input bound fits in u64");
+    limits.max_block_bytes = 1_024;
+    limits.max_decoded_items_per_block = 64;
+    limits.max_decoded_items_per_step = 64;
+    limits.max_packets = 256;
+    limits.max_sections = 32;
+    limits.max_interfaces = 64;
+    limits.max_diagnostics = 256;
+    limits.max_layers = 1_024;
+    limits.max_layers_per_packet = 8;
+    limits.max_fields = 8_192;
+    limits.max_fields_per_packet = 64;
+    limits.max_field_children = 16_384;
+    limits.max_field_children_per_packet = 128;
+    limits.max_string_bytes = 8_192;
+    limits
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -71,6 +77,11 @@ fn bounded_capture(data: &[u8]) -> Option<Vec<u8>> {
     (data.len() <= MAX_CAPTURE_BYTES).then(|| data.to_vec())
 }
 
+fn decoded_importer(bytes: Box<[u8]>) -> Option<CaptureImporter> {
+    CaptureImporter::new_with_decoder(bytes, fuzz_limits(), Box::new(LinkLayerDecoder::default()))
+        .ok()
+}
+
 fn assert_monotonic(previous: ImportProgress, current: ImportProgress) {
     assert_eq!(current.total_bytes, previous.total_bytes);
     assert!(current.consumed_bytes >= previous.consumed_bytes);
@@ -81,12 +92,23 @@ fn assert_monotonic(previous: ImportProgress, current: ImportProgress) {
     assert!(current.diagnostics >= previous.diagnostics);
 }
 
+fn assert_valid_dataset(dataset: &CaptureDataset) {
+    dataset
+        .validate()
+        .expect("a completed decoded import preserves canonical model invariants");
+
+    for packet in dataset.packets() {
+        let layers =
+            &dataset.layers()[packet.layers.start() as usize..packet.layers.end() as usize];
+        for layer in layers {
+            assert!(layer.byte_range.start() >= packet.data.start());
+            assert!(layer.byte_range.end() <= packet.data.end());
+        }
+    }
+}
+
 fn exercise_cancellation(bytes: &[u8]) {
-    // Cancellation consumes its importer. A second, separately bounded owner
-    // lets the same input also exercise terminal processing without retaining
-    // parser views or making an unbounded capture copy.
-    let Ok(mut importer) = CaptureImporter::new(bytes.to_vec().into_boxed_slice(), fuzz_limits())
-    else {
+    let Some(mut importer) = decoded_importer(bytes.to_vec().into_boxed_slice()) else {
         return;
     };
     let before = importer.progress();
@@ -96,7 +118,7 @@ fn exercise_cancellation(bytes: &[u8]) {
 }
 
 fn exercise_to_terminal(bytes: Vec<u8>) {
-    let Ok(mut importer) = CaptureImporter::new(bytes.into_boxed_slice(), fuzz_limits()) else {
+    let Some(mut importer) = decoded_importer(bytes.into_boxed_slice()) else {
         return;
     };
     let mut previous = importer.progress();
@@ -141,13 +163,16 @@ fn exercise_to_terminal(bytes: Vec<u8>) {
                         .expect("a completed importer remains ready"),
                     ImportStep::Ready(progress)
                 );
-                let _ = importer.finish();
+                let dataset = importer
+                    .finish()
+                    .expect("a ready decoded import finalizes into a valid dataset");
+                assert_valid_dataset(&dataset);
                 return;
             }
         }
     }
 
-    panic!("bounded importer did not reach a terminal result");
+    panic!("bounded decoded importer did not reach a terminal result");
 }
 
 fuzz_target!(|data: &[u8]| {
