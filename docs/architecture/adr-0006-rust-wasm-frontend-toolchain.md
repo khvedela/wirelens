@@ -38,10 +38,11 @@ Each flow must:
 | pnpm | `11.17.0` | Locked frontend dependency installation through Corepack |
 | `wasm-bindgen` crate and CLI | `0.2.126` | Binding schema and direct generator |
 | `wasm-pack` | `0.15.0` | Measured comparison flow only |
-| Vite / React / TypeScript | `8.1.5` / `19.2.8` / `6.0.3` | Disposable production integration probe |
+| Vite / React / TypeScript | `8.1.5` / `19.2.8` / `6.0.3` | Product application, bundle, and type checking |
 | Playwright | `1.62.0` | Chromium and Firefox production-bundle validation |
+| Biome | `2.5.5` | Product TypeScript/JavaScript/CSS formatting and linting |
 
-The repository pins Rust in [`rust-toolchain.toml`](../../rust-toolchain.toml) and Node in [`.nvmrc`](../../.nvmrc) and [`.node-version`](../../.node-version). The probe package pins pnpm and every JavaScript dependency in its lockfile. The `wasm-bindgen` crate and CLI must remain the exact same version because their generated binding schema is version-sensitive.
+The repository pins Rust in [`rust-toolchain.toml`](../../rust-toolchain.toml) and Node in [`.nvmrc`](../../.nvmrc) and [`.node-version`](../../.node-version). Each frontend package pins pnpm and every JavaScript dependency in its lockfile. The `wasm-bindgen` crate and CLI must remain the exact same version because their generated binding schema is version-sensitive.
 
 TypeScript 7 is intentionally not the product baseline: its stable release removed the programmatic API used by parts of the wider TypeScript tooling ecosystem. The Vite probe uses the conservative 6.0 line until downstream tools explicitly validate TypeScript 7 support.
 
@@ -107,5 +108,5 @@ No runtime CDN, package registry, telemetry, or remote Wasm location is permitte
 ## Consequences
 
 - Issue #9 can implement the boundary against one proven binding generation and worker-loading contract.
-- Issue #10 can use Vite's native module-worker discovery and same-origin asset pipeline.
+- Issue #10 uses Vite's native module-worker discovery and same-origin asset pipeline in `apps/web`.
 - A future version bump must update pins, regenerate lockfiles, rerun both comparison flows, and record browser evidence before changing this ADR's supported matrix.

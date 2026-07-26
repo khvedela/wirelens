@@ -5,7 +5,14 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const REPOSITORY_ROOT = resolve(ROOT, "../../..");
-export const GENERATED_ROOT = join(ROOT, "web", "generated");
+export const PRODUCT_BOUNDARY_ROOT = join(
+  REPOSITORY_ROOT,
+  "apps",
+  "web",
+  "src",
+  "boundary",
+);
+export const GENERATED_ROOT = join(PRODUCT_BOUNDARY_ROOT, "generated");
 export const EXPECTED = Object.freeze({
   node: "v24.18.0",
   pnpm: "11.17.0",

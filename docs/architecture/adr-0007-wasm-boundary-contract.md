@@ -8,7 +8,7 @@
 
 ## Context
 
-The canonical capture model is Rust-owned, immutable, and index-first. The browser needs a stable way to create that model, observe bounded progress, cancel work, and request bounded result pages without exposing Rust references or expanding the capture into JavaScript objects. Issue [#9](https://github.com/khvedela/wirelens/issues/9) owns this Wasm boundary. Issue [#10](https://github.com/khvedela/wirelens/issues/10) will consume it from the user-facing browser ingestion workflow.
+The canonical capture model is Rust-owned, immutable, and index-first. The browser needs a stable way to create that model, observe bounded progress, cancel work, and request bounded result pages without exposing Rust references or expanding the capture into JavaScript objects. Issue [#9](https://github.com/khvedela/wirelens/issues/9) owns this Wasm boundary. Issue [#10](https://github.com/khvedela/wirelens/issues/10) consumes it from the user-facing browser ingestion workflow, with separate [browser-ingestion evidence](../../benchmarks/browser-ingestion/EVIDENCE.md).
 
 `pcap-parser` emits blocks that borrow its reader buffer. Those blocks are valid only during the current reader step and cannot become JavaScript views or long-lived model references. A Wasm call is also synchronous on its worker: while Rust is running, the same worker cannot receive a cancellation message. The boundary therefore needs explicit ownership, step, lifetime, and scheduling rules rather than a single long-running import call.
 

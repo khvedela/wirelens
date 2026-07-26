@@ -1,6 +1,6 @@
 # Wasm boundary API v1
 
-This is the reviewed public signature snapshot for ADR-0007 and issue #9. The production build regenerates `web/generated/wirelens_wasm_boundary.d.ts`; `verify:contract` reads the marked snapshot below and checks every signature against that declaration. Generated initialization boilerplate remains outside the product API snapshot because it is reproducible from the pinned Rust and `wasm-bindgen` toolchain.
+This is the reviewed public signature snapshot for ADR-0007 and issue #9. The production build regenerates `apps/web/src/boundary/generated/wirelens_wasm_boundary.d.ts`; `verify:contract` reads the marked snapshot below and checks every signature against that declaration. Generated initialization boilerplate remains outside the product API snapshot because it is reproducible from the pinned Rust and `wasm-bindgen` toolchain.
 
 ## Raw `wasm-bindgen` exports
 

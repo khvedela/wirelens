@@ -1,0 +1,151 @@
+{
+  "browserVersion": "150.0.7871.184",
+  "baselineResources": {
+    "currentOwnedCaptureBytes": "0",
+    "cursors": 0,
+    "datasets": 0,
+    "imports": 0,
+    "retainedBatchBytes": "0",
+    "retainedCaptureBytes": "0",
+    "retainedIndexBytes": "0",
+    "retainedLogicalBytes": "0",
+    "retainedPacketIndexBytes": "0",
+    "totalLogicalBytesUpperBound": "0",
+    "transientAuxiliaryBytesUpperBound": "0",
+    "transientImportInputBytes": "0",
+    "transientPacketIndexBytesUpperBound": "0",
+    "transientParserBufferBytesUpperBound": "0"
+  },
+  "cancellationLatenciesMs": [
+    7.25,
+    6.704999998211861,
+    13.855000004172325,
+    6.695000000298023,
+    7.1450000032782555,
+    6.260000005364418
+  ],
+  "cancellationMedianMs": 6.925000000745058,
+  "cancellationPhases": [
+    "reading",
+    "parsing",
+    "reading",
+    "parsing",
+    "reading",
+    "parsing"
+  ],
+  "effectiveThroughputMibPerSecond": 295.7876214057981,
+  "environment": {
+    "architecture": "arm64",
+    "cpu": "Apple M3 Pro",
+    "logicalCpus": 11,
+    "platform": "darwin",
+    "totalMemoryBytes": 19327352832
+  },
+  "fixture": {
+    "exactBytes": 250613512,
+    "manifestSha256": "54f305a78a624c1a373bc748be068b97b281560d05349fc847cafcecadbc8378",
+    "recipe": {
+      "kind": "supported-large-pcap",
+      "payloadBytes": 1048576,
+      "targetBytes": 251658240
+    },
+    "targetBytes": 251658240
+  },
+  "heartbeatTicks": 205,
+  "importElapsedMs": 808.024584,
+  "longTasksOver50Ms": [],
+  "memory": {
+    "attributablePeakBytes": 255294896,
+    "attributablePeakRatio": 1.0186796951315218,
+    "baselineBytes": 3694146,
+    "finalBytes": 255953910,
+    "modeledEnvelope": {
+      "admittedReadChunkBytes": 4194304,
+      "bytes": 505421328,
+      "parserLogicalUpperBoundBytes": 283132682,
+      "ratioToCapture": 2.0167361446975773,
+      "readAssemblyPeakBytes": 254807816,
+      "synchronousCopyPeakBytes": 505421328
+    },
+    "peakBytes": 258989042,
+    "sampleCount": 31,
+    "samples": [
+      3589875,
+      258691626,
+      258853574,
+      258989042,
+      258958722,
+      258874683,
+      255913329,
+      256471378,
+      256005693,
+      255942902,
+      256104947,
+      256300414,
+      255936542,
+      255930408,
+      255862342,
+      255954598,
+      256032501,
+      256054955,
+      255997239,
+      256386162,
+      255953501,
+      255969354,
+      255979446,
+      255988242,
+      256545874,
+      256033770,
+      255965104,
+      256027444,
+      256027914,
+      256027722,
+      256026975
+    ]
+  },
+  "privacy": {
+    "bodyBearingRequests": 0,
+    "postReadyHttpRequests": 0,
+    "runtimeErrors": 0,
+    "webSockets": 0
+  },
+  "recordedAt": "2026-07-26T20:33:13.962Z",
+  "qualifyingProfile": true,
+  "resetResources": {
+    "currentOwnedCaptureBytes": "0",
+    "cursors": 0,
+    "datasets": 0,
+    "imports": 0,
+    "retainedBatchBytes": "0",
+    "retainedCaptureBytes": "0",
+    "retainedIndexBytes": "0",
+    "retainedLogicalBytes": "0",
+    "retainedPacketIndexBytes": "0",
+    "totalLogicalBytesUpperBound": "0",
+    "transientAuxiliaryBytesUpperBound": "0",
+    "transientImportInputBytes": "0",
+    "transientPacketIndexBytesUpperBound": "0",
+    "transientParserBufferBytesUpperBound": "0"
+  },
+  "successResources": {
+    "currentOwnedCaptureBytes": "250613512",
+    "cursors": 0,
+    "datasets": 1,
+    "imports": 0,
+    "retainedBatchBytes": "0",
+    "retainedCaptureBytes": "250613512",
+    "retainedIndexBytes": "28828",
+    "retainedLogicalBytes": "250642340",
+    "retainedPacketIndexBytes": "19120",
+    "totalLogicalBytesUpperBound": "250642340",
+    "transientAuxiliaryBytesUpperBound": "0",
+    "transientImportInputBytes": "0",
+    "transientPacketIndexBytesUpperBound": "0",
+    "transientParserBufferBytesUpperBound": "0"
+  },
+  "source": {
+    "baseRevision": "0aee3332c3c24fd9883e175f4027de6aeb99329b",
+    "sha256": "e79c71ce3d4b3af97d922cf0f02ce51ece0a16edad0a938440a87b6aebd05a96"
+  },
+  "workerToMainBinaryBytes": 0
+}

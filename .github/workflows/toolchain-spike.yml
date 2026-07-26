@@ -10,6 +10,8 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "crates/**"
+      - "apps/web/**"
+      - "benchmarks/browser-ingestion/**"
       - "benchmarks/wasm/boundary-harness/**"
       - "benchmarks/wasm/toolchain-spike/**"
       - "fixtures/manifests/**"
@@ -74,6 +76,10 @@ jobs:
         working-directory: benchmarks/wasm/boundary-harness
         run: corepack pnpm install --frozen-lockfile
 
+      - name: Install locked product-web dependencies
+        working-directory: apps/web
+        run: corepack pnpm install --frozen-lockfile
+
       - name: Install shared exact Wasm tools
         working-directory: benchmarks/wasm/boundary-harness
         run: corepack pnpm run tools:install
@@ -96,6 +102,33 @@ jobs:
       - name: Verify boundary browser suite in Chromium and Firefox
         working-directory: benchmarks/wasm/boundary-harness
         run: corepack pnpm run test:browser
+
+      - name: Verify browser-ingestion fixtures, privacy boundary, and production build
+        working-directory: apps/web
+        run: |
+          corepack pnpm run format:check
+          corepack pnpm run lint
+          corepack pnpm run test:fixtures
+          corepack pnpm run typecheck
+          corepack pnpm run verify:privacy
+          corepack pnpm run evidence:check
+          corepack pnpm run build:web
+
+      - name: Verify product importer in Chromium and Firefox
+        working-directory: apps/web
+        run: corepack pnpm run test:browser
+
+      - name: Record qualifying full-Chromium browser-ingestion evidence
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: apps/web
+        env:
+          WIRELENS_INGESTION_EVIDENCE_MIB: 240
+        run: |
+          corepack pnpm run test:browser:evidence
+          test -s test-results/browser-ingestion-evidence.json
+          node scripts/evidence.mjs --render-only --output test-results/browser-ingestion-evidence.md
+          test -s test-results/browser-ingestion-evidence.md
+          cat test-results/browser-ingestion-evidence.md >> "$GITHUB_STEP_SUMMARY"
 
   fuzz-corpus-replay:
     if: github.event_name == 'pull_request'

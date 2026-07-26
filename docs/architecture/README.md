@@ -16,7 +16,7 @@ WireLens combines a React/TypeScript browser interface, a Web Worker, and platfo
 ## Open decisions
 
 1. **Frontend product setup:** select application-level accessibility, component, state, and test libraries; define PWA caching, static deployment, and long-term maintenance beyond ADR-0006's proven build contract.
-2. **Large files:** decide whether browser acquisition needs streaming or chunked Rust ingress beyond ADR-0007's complete-input contract; define memory budgets, incremental indexes, and realistic browser limits.
+2. **Large files:** resolve [#55](https://github.com/khvedela/wirelens/issues/55): decide whether browser acquisition needs a higher complete-input ceiling, streaming/file-backed Rust ingress, or a revised product criterion. Proposed ADR-0008 keeps supported-path evidence separate from the current `>=500 MB` criterion.
 3. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
 4. **Visualization libraries:** packet-table virtualization, charts, sequence diagrams, topology rendering, accessibility, bundle size, and performance.
 5. **Native-agent protocol:** local authentication, transport, schema evolution, batching, backpressure, replay resistance, and raw-packet exposure.
@@ -35,3 +35,7 @@ Accepted ADRs are normative for browser/native responsibilities, crate and packa
 - [ADR-0005: canonical capture and packet data model](./adr-0005-canonical-capture-packet-model.md)
 - [ADR-0006: Rust, WebAssembly, and frontend toolchain](./adr-0006-rust-wasm-frontend-toolchain.md)
 - [ADR-0007: WebAssembly boundary contract](./adr-0007-wasm-boundary-contract.md)
+
+## Proposed architecture decisions
+
+- [ADR-0008: reconcile the large-capture criterion with the v1 Wasm boundary](./adr-0008-large-capture-criterion.md) — interim evidence policy; final resolution tracked in [#55](https://github.com/khvedela/wirelens/issues/55)
