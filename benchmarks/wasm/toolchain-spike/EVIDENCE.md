@@ -49,11 +49,13 @@ The first default wasm-pack release attempt failed because its downloaded `wasm-
 | --- | ---: | ---: |
 | Generated binding JavaScript | 4,411 bytes | 4,411 bytes |
 | Binding JavaScript SHA-256 | `57738e48798b60a3d9ae9abf0ffdc5ff75678b38a65a10c8d2d17e122d5d7093` | Same |
-| Processed Wasm | 14,717 bytes | 14,717 bytes |
-| Wasm SHA-256 | `3ab25e3f804f024e71dfa921c1ab0cc01794099a40578686954d08b426611a1e` | Same |
+| Processed Wasm | 14,709 bytes | 14,709 bytes |
+| Wasm SHA-256 | `7b2965e3e649d1ca85eb7dbbc2fe66df3794da4fea91f810a146023a01ffb08e` | Same |
 | Production worker chunk | 2,333 bytes | 2,336 bytes |
 
-The shared production build also emitted one 14,717-byte fingerprinted Wasm asset and a 192,855-byte React entry chunk. These are toolchain comparison measurements, not product bundle or performance budgets.
+The initial Ubuntu 24.04 x64 run exposed absolute Cargo registry paths in panic-location strings. The committed `CARGO_ENCODED_RUSTFLAGS` remap both the checkout and Cargo home to stable virtual roots before compilation; the verifier now requires macOS arm64 and Ubuntu x64 to produce the single recorded JavaScript and Wasm hashes above.
+
+The shared production build also emitted one 14,709-byte fingerprinted Wasm asset and a 192,855-byte React entry chunk. These are toolchain comparison measurements, not product bundle or performance budgets.
 
 ## Browser assertions
 

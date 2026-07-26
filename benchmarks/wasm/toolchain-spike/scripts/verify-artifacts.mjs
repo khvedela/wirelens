@@ -9,8 +9,8 @@ const report = { bundles: {}, dist: {} };
 const expectedArtifacts = Object.freeze({
   jsBytes: 4_411,
   jsSha256: "57738e48798b60a3d9ae9abf0ffdc5ff75678b38a65a10c8d2d17e122d5d7093",
-  wasmBytes: 14_717,
-  wasmSha256: "3ab25e3f804f024e71dfa921c1ab0cc01794099a40578686954d08b426611a1e",
+  wasmBytes: 14_709,
+  wasmSha256: "7b2965e3e649d1ca85eb7dbbc2fe66df3794da4fea91f810a146023a01ffb08e",
 });
 
 function walk(directory) {

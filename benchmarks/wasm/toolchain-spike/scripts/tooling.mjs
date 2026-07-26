@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,8 +70,14 @@ export function assertOutput(command, args, expected, label) {
 export function pinnedRustEnvironment() {
   const rustupBin = dirname(capture("which", ["rustup"]));
   const localToolsBin = join(TOOLS_ROOT, "bin");
+  const cargoHome = resolve(process.env.CARGO_HOME ?? join(homedir(), ".cargo"));
+  const remapFlags = [
+    `--remap-path-prefix=${ROOT}=/wirelens/toolchain-spike`,
+    `--remap-path-prefix=${cargoHome}=/cargo-home`,
+  ].join("\u001f");
   return {
     CARGO: capture("rustup", ["which", "--toolchain", EXPECTED.rust, "cargo"]),
+    CARGO_ENCODED_RUSTFLAGS: remapFlags,
     PATH: `${localToolsBin}${delimiter}${rustupBin}${delimiter}${process.env.PATH ?? ""}`,
     RUSTC: capture("rustup", ["which", "--toolchain", EXPECTED.rust, "rustc"]),
     RUSTDOC: capture("rustup", ["which", "--toolchain", EXPECTED.rust, "rustdoc"]),

@@ -19,7 +19,7 @@ The probe uses only the in-memory synthetic byte vector `[1, 2, 3, 4, 255]`. It 
 | TypeScript | 6.0.3 |
 | Playwright | 1.62.0 |
 
-The local CLIs are installed under ignored `.tools/`; the scripts reject mismatched versions. The Rust and pnpm dependency graphs are committed as lockfiles.
+The local CLIs are installed under ignored `.tools/`; the scripts reject mismatched versions. The Rust and pnpm dependency graphs are committed as lockfiles. Encoded Rust flags remap the checkout and Cargo-home paths before compilation so panic-location strings do not make Wasm artifacts host-path-dependent; the verifier requires both build flows and both measured hosts to remain byte-identical.
 
 ## Reproduce
 
