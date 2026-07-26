@@ -115,163 +115,152 @@ fn capability_usize(value: usize) -> Result<f64, JsValue> {
     })
 }
 
+fn set_capability_numbers(result: &Object, values: &[(&str, f64)]) -> Result<(), JsValue> {
+    for &(name, value) in values {
+        set_number(result, name, value)?;
+    }
+    Ok(())
+}
+
+fn set_core_capabilities(result: &Object) -> Result<(), JsValue> {
+    set_capability_numbers(
+        result,
+        &[
+            ("apiVersion", f64::from(API_VERSION)),
+            ("batchSchemaVersion", f64::from(BATCH_SCHEMA_VERSION)),
+            ("maxCaptureBytes", capability_u64(MAX_CAPTURE_BYTES)?),
+            (
+                "maxTotalCaptureBytes",
+                capability_u64(MAX_TOTAL_CAPTURE_BYTES)?,
+            ),
+            ("maxBlockBytes", f64::from(MAX_CAPTURE_BLOCK_BYTES)),
+            (
+                "maxDecodedItemsPerBlock",
+                f64::from(MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK),
+            ),
+            (
+                "maxDecodedItemsPerStep",
+                f64::from(MAX_CAPTURE_DECODED_ITEMS_PER_STEP),
+            ),
+            (
+                "maxTotalLogicalBytes",
+                capability_u64(MAX_TOTAL_LOGICAL_BYTES)?,
+            ),
+            ("maxEvidenceBytes", f64::from(MAX_EVIDENCE_BYTES)),
+            ("maxImportStepBytes", capability_u64(MAX_IMPORT_STEP_BYTES)?),
+            ("maxImportStepRecords", f64::from(MAX_IMPORT_STEP_RECORDS)),
+            ("maxDiagnostics", f64::from(MAX_CAPTURE_DIAGNOSTICS)),
+            (
+                "maxInternedStringBytes",
+                f64::from(MAX_CAPTURE_STRING_BYTES),
+            ),
+            ("maxSections", f64::from(MAX_CAPTURE_SECTIONS)),
+            ("maxInterfaces", f64::from(MAX_CAPTURE_INTERFACES)),
+        ],
+    )
+}
+
+fn set_packet_capabilities(result: &Object) -> Result<(), JsValue> {
+    set_capability_numbers(
+        result,
+        &[
+            ("maxPackets", f64::from(MAX_CAPTURE_PACKETS)),
+            (
+                "packetAdmissionBase",
+                f64::from(CAPTURE_PACKET_BASE_ALLOWANCE),
+            ),
+            (
+                "packetAdmissionBytesPerPacket",
+                f64::from(CAPTURE_BYTES_PER_PACKET),
+            ),
+        ],
+    )?;
+    set_string(
+        result,
+        "packetAdmissionRule",
+        "min(maxPackets, packetAdmissionBase + floor(captureBytes / packetAdmissionBytesPerPacket))",
+    )
+}
+
+fn set_decoded_arena_capabilities(result: &Object) -> Result<(), JsValue> {
+    set_capability_numbers(
+        result,
+        &[
+            (
+                "decodedLayerAdmissionBytesPerItem",
+                f64::from(CAPTURE_BYTES_PER_DECODED_LAYER),
+            ),
+            (
+                "decodedLayerAdmissionBase",
+                f64::from(CAPTURE_DECODED_LAYER_BASE_ALLOWANCE),
+            ),
+            (
+                "decodedFieldAdmissionBytesPerItem",
+                f64::from(CAPTURE_BYTES_PER_DECODED_FIELD),
+            ),
+            (
+                "decodedFieldAdmissionBase",
+                f64::from(CAPTURE_DECODED_FIELD_BASE_ALLOWANCE),
+            ),
+            (
+                "fieldChildAdmissionBytesPerItem",
+                f64::from(CAPTURE_BYTES_PER_FIELD_CHILD),
+            ),
+            (
+                "fieldChildAdmissionBase",
+                f64::from(CAPTURE_FIELD_CHILD_BASE_ALLOWANCE),
+            ),
+            ("maxLayers", f64::from(MAX_CAPTURE_LAYERS)),
+            (
+                "maxLayersPerPacket",
+                f64::from(MAX_CAPTURE_LAYERS_PER_PACKET),
+            ),
+            ("maxFields", f64::from(MAX_CAPTURE_FIELDS)),
+            (
+                "maxFieldsPerPacket",
+                f64::from(MAX_CAPTURE_FIELDS_PER_PACKET),
+            ),
+            ("maxFieldChildren", f64::from(MAX_CAPTURE_FIELD_CHILDREN)),
+            (
+                "maxFieldChildrenPerPacket",
+                f64::from(MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET),
+            ),
+        ],
+    )?;
+    set_string(
+        result,
+        "decodedArenaAdmissionRule",
+        "min(requestedTotal, globalTotal, max(arenaBase, ceil(captureBytes / admissionBytesPerItem)))",
+    )
+}
+
+fn set_registry_and_output_capabilities(result: &Object) -> Result<(), JsValue> {
+    set_capability_numbers(
+        result,
+        &[
+            ("maxImportHandles", capability_usize(MAX_IMPORT_HANDLES)?),
+            ("maxDatasetHandles", capability_usize(MAX_DATASET_HANDLES)?),
+            (
+                "maxPacketCursorHandles",
+                capability_usize(MAX_PACKET_CURSOR_HANDLES)?,
+            ),
+            (
+                "maxPacketBatchBytes",
+                capability_usize(MAX_PACKET_BATCH_BYTES)?,
+            ),
+            ("maxPacketBatchRows", f64::from(MAX_PACKET_BATCH_ROWS)),
+        ],
+    )
+}
+
 /// Returns the immutable resource and compatibility limits for this build.
 #[wasm_bindgen]
 pub fn capabilities() -> Result<JsValue, JsValue> {
     let result = try_new_object()?;
-    set_number(&result, "apiVersion", f64::from(API_VERSION))?;
-    set_number(
-        &result,
-        "batchSchemaVersion",
-        f64::from(BATCH_SCHEMA_VERSION),
-    )?;
-    set_number(
-        &result,
-        "maxCaptureBytes",
-        capability_u64(MAX_CAPTURE_BYTES)?,
-    )?;
-    set_number(
-        &result,
-        "maxTotalCaptureBytes",
-        capability_u64(MAX_TOTAL_CAPTURE_BYTES)?,
-    )?;
-    set_number(&result, "maxBlockBytes", f64::from(MAX_CAPTURE_BLOCK_BYTES))?;
-    set_number(
-        &result,
-        "maxDecodedItemsPerBlock",
-        f64::from(MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK),
-    )?;
-    set_number(
-        &result,
-        "maxDecodedItemsPerStep",
-        f64::from(MAX_CAPTURE_DECODED_ITEMS_PER_STEP),
-    )?;
-    set_number(
-        &result,
-        "maxTotalLogicalBytes",
-        capability_u64(MAX_TOTAL_LOGICAL_BYTES)?,
-    )?;
-    set_number(&result, "maxEvidenceBytes", f64::from(MAX_EVIDENCE_BYTES))?;
-    set_number(
-        &result,
-        "maxImportStepBytes",
-        capability_u64(MAX_IMPORT_STEP_BYTES)?,
-    )?;
-    set_number(
-        &result,
-        "maxImportStepRecords",
-        f64::from(MAX_IMPORT_STEP_RECORDS),
-    )?;
-    set_number(&result, "maxPackets", f64::from(MAX_CAPTURE_PACKETS))?;
-    set_number(
-        &result,
-        "packetAdmissionBase",
-        f64::from(CAPTURE_PACKET_BASE_ALLOWANCE),
-    )?;
-    set_number(
-        &result,
-        "packetAdmissionBytesPerPacket",
-        f64::from(CAPTURE_BYTES_PER_PACKET),
-    )?;
-    set_string(
-        &result,
-        "packetAdmissionRule",
-        "min(maxPackets, packetAdmissionBase + floor(captureBytes / packetAdmissionBytesPerPacket))",
-    )?;
-    set_number(
-        &result,
-        "maxDiagnostics",
-        f64::from(MAX_CAPTURE_DIAGNOSTICS),
-    )?;
-    set_number(
-        &result,
-        "maxInternedStringBytes",
-        f64::from(MAX_CAPTURE_STRING_BYTES),
-    )?;
-    set_number(&result, "maxSections", f64::from(MAX_CAPTURE_SECTIONS))?;
-    set_number(&result, "maxInterfaces", f64::from(MAX_CAPTURE_INTERFACES))?;
-    set_number(
-        &result,
-        "decodedLayerAdmissionBytesPerItem",
-        f64::from(CAPTURE_BYTES_PER_DECODED_LAYER),
-    )?;
-    set_number(
-        &result,
-        "decodedLayerAdmissionBase",
-        f64::from(CAPTURE_DECODED_LAYER_BASE_ALLOWANCE),
-    )?;
-    set_number(
-        &result,
-        "decodedFieldAdmissionBytesPerItem",
-        f64::from(CAPTURE_BYTES_PER_DECODED_FIELD),
-    )?;
-    set_number(
-        &result,
-        "decodedFieldAdmissionBase",
-        f64::from(CAPTURE_DECODED_FIELD_BASE_ALLOWANCE),
-    )?;
-    set_number(
-        &result,
-        "fieldChildAdmissionBytesPerItem",
-        f64::from(CAPTURE_BYTES_PER_FIELD_CHILD),
-    )?;
-    set_number(
-        &result,
-        "fieldChildAdmissionBase",
-        f64::from(CAPTURE_FIELD_CHILD_BASE_ALLOWANCE),
-    )?;
-    set_string(
-        &result,
-        "decodedArenaAdmissionRule",
-        "min(requestedTotal, globalTotal, max(arenaBase, ceil(captureBytes / admissionBytesPerItem)))",
-    )?;
-    set_number(&result, "maxLayers", f64::from(MAX_CAPTURE_LAYERS))?;
-    set_number(
-        &result,
-        "maxLayersPerPacket",
-        f64::from(MAX_CAPTURE_LAYERS_PER_PACKET),
-    )?;
-    set_number(&result, "maxFields", f64::from(MAX_CAPTURE_FIELDS))?;
-    set_number(
-        &result,
-        "maxFieldsPerPacket",
-        f64::from(MAX_CAPTURE_FIELDS_PER_PACKET),
-    )?;
-    set_number(
-        &result,
-        "maxFieldChildren",
-        f64::from(MAX_CAPTURE_FIELD_CHILDREN),
-    )?;
-    set_number(
-        &result,
-        "maxFieldChildrenPerPacket",
-        f64::from(MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET),
-    )?;
-    set_number(
-        &result,
-        "maxImportHandles",
-        capability_usize(MAX_IMPORT_HANDLES)?,
-    )?;
-    set_number(
-        &result,
-        "maxDatasetHandles",
-        capability_usize(MAX_DATASET_HANDLES)?,
-    )?;
-    set_number(
-        &result,
-        "maxPacketCursorHandles",
-        capability_usize(MAX_PACKET_CURSOR_HANDLES)?,
-    )?;
-    set_number(
-        &result,
-        "maxPacketBatchBytes",
-        capability_usize(MAX_PACKET_BATCH_BYTES)?,
-    )?;
-    set_number(
-        &result,
-        "maxPacketBatchRows",
-        f64::from(MAX_PACKET_BATCH_ROWS),
-    )?;
+    set_core_capabilities(&result)?;
+    set_packet_capabilities(&result)?;
+    set_decoded_arena_capabilities(&result)?;
+    set_registry_and_output_capabilities(&result)?;
     Ok(result.into())
 }
 
