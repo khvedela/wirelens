@@ -1,6 +1,6 @@
 # WireLens roadmap
 
-WireLens is planned in evidence-driven phases. Dates are intentionally unset until the architecture spike establishes feasible boundaries and measurable performance targets.
+WireLens is delivered in evidence-driven phases. Dates remain intentionally unset; each phase advances only after its dependencies and measurable acceptance criteria are verified.
 
 ## M0 — Foundation
 
@@ -28,6 +28,6 @@ Continue [EPIC 7](https://github.com/khvedela/wirelens/issues/36) by evaluating 
 
 ## Dependency sequence
 
-Architecture constraints → workspace boundaries → parser selection → packet model → Wasm boundary → browser ingestion → protocol decoders → flow analysis → investigation UX → hardening → optional live capture → optional eBPF.
+Architecture constraints → toolchain and workspace boundaries → parser selection → packet model → Wasm boundary → browser ingestion → protocol decoders → flow analysis → investigation UX → hardening → optional live capture → optional eBPF.
 
 Status, priority, size, risk, and target metadata are maintained in the public [WireLens Roadmap GitHub Project](https://github.com/users/khvedela/projects/4).

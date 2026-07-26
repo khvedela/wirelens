@@ -1,0 +1,74 @@
+name: Toolchain spike
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/toolchain-spike.yml"
+      - ".node-version"
+      - ".nvmrc"
+      - "rust-toolchain.toml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "benchmarks/wasm/toolchain-spike/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: toolchain-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Rust/Wasm module-worker probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+
+      - name: Install pinned Rust and Wasm target
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup default 1.97.1
+
+      - name: Verify Rust workspace and MSRV
+        run: |
+          cargo fmt --all --check
+          cargo check --locked --workspace --all-targets --all-features
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-targets --all-features
+          cargo check --locked --workspace --target wasm32-unknown-unknown --all-features
+          RUSTUP_TOOLCHAIN=1.85.0 cargo check --locked --workspace --all-targets --all-features
+
+      - name: Install locked frontend dependencies
+        working-directory: benchmarks/wasm/toolchain-spike
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Install exact Wasm tools
+        working-directory: benchmarks/wasm/toolchain-spike
+        run: corepack pnpm run tools:install
+
+      - name: Install browser engines and system dependencies
+        working-directory: benchmarks/wasm/toolchain-spike
+        run: corepack pnpm exec playwright install --with-deps chromium firefox
+
+      - name: Verify both production module-worker flows
+        working-directory: benchmarks/wasm/toolchain-spike
+        run: corepack pnpm run verify:all

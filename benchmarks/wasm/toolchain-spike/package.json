@@ -1,0 +1,40 @@
+{
+  "name": "@wirelens/wasm-toolchain-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.18.0",
+    "pnpm": "11.17.0"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "build:direct": "node scripts/build-direct.mjs",
+    "build:wasm-pack": "node scripts/build-wasm-pack.mjs",
+    "build:web": "vite build",
+    "check:rust": "node scripts/check-rust.mjs",
+    "evidence": "node scripts/verify-artifacts.mjs",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "test": "corepack pnpm run verify:all",
+    "test:browser:direct": "playwright test --grep direct",
+    "test:browser:wasm-pack": "playwright test --grep wasm-pack",
+    "test:rust": "node scripts/test-rust.mjs",
+    "tools:install": "node scripts/install-tools.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify:artifacts": "node scripts/verify-artifacts.mjs",
+    "verify:toolchain": "node scripts/verify-toolchain.mjs",
+    "verify:all": "corepack pnpm run verify:toolchain && corepack pnpm run check:rust && corepack pnpm run test:rust && corepack pnpm run build:direct && corepack pnpm run build:wasm-pack && corepack pnpm run typecheck && corepack pnpm run build:web && corepack pnpm run verify:artifacts && corepack pnpm run test:browser:direct && corepack pnpm run test:browser:wasm-pack"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "typescript": "6.0.3",
+    "vite": "8.1.5"
+  }
+}
