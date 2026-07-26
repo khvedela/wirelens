@@ -235,3 +235,31 @@ fn million_packet_index_has_a_bounded_metadata_estimate() {
     let metadata_bytes = size_of::<PacketRecord>() * 1_000_000;
     assert!(metadata_bytes <= 96 * 1_000_000);
 }
+
+#[test]
+fn dataset_debug_output_never_contains_capture_payload() {
+    let dataset = CaptureDataset::from_parts(CaptureDatasetParts {
+        metadata: CaptureMetadata {
+            format: CaptureFormat::Pcap,
+            byte_length: 6,
+            packet_count: 0,
+            started_at: None,
+            ended_at: None,
+        },
+        bytes: b"secret".to_vec().into_boxed_slice(),
+        sections: Box::default(),
+        interfaces: Box::default(),
+        packets: Box::default(),
+        layers: Box::default(),
+        fields: Box::default(),
+        field_children: Box::default(),
+        diagnostics: Box::default(),
+        strings: Box::default(),
+    })
+    .expect("empty dataset is valid");
+
+    let debug = format!("{dataset:?}");
+    assert!(!debug.contains("secret"));
+    assert!(!debug.contains("[115, 101, 99"));
+    assert!(debug.contains("packet_count"));
+}

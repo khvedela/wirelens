@@ -23,6 +23,7 @@ The canonical model lives in platform-neutral `packet-core` and is an immutable,
 - packet facts separated from future derived flow/analysis facts.
 
 The Rust types and invariant tests are implemented under `crates/packet-core`. The crate has no DOM, browser, JavaScript, WebAssembly, React, or UI dependency.
+Its debug representation reports only counts and metadata; it never formats capture bytes or decoded payload content.
 
 ## Identity and timestamp semantics
 

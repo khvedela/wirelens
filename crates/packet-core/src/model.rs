@@ -1,5 +1,7 @@
 //! Canonical capture, interface, and packet model.
 
+use core::fmt;
+
 use crate::{
     ByteRange, CaptureTimestamp, DecodedField, Diagnostic, FieldId, IndexRange, LayerFact,
     StringId, TimestampResolution,
@@ -110,7 +112,7 @@ pub struct PacketRecord {
 }
 
 /// Owned, immutable dataset assembled by capture ingestion.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct CaptureDataset {
     /// Capture-wide metadata.
     metadata: CaptureMetadata,
@@ -135,7 +137,7 @@ pub struct CaptureDataset {
 }
 
 /// Mutable construction payload consumed exactly once into a validated dataset.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct CaptureDatasetParts {
     /// Capture-wide metadata.
     pub metadata: CaptureMetadata,
@@ -157,6 +159,36 @@ pub struct CaptureDatasetParts {
     pub diagnostics: Box<[Diagnostic]>,
     /// Deduplicated labels, protocol names, and safe diagnostic text.
     pub strings: Box<[Box<str>]>,
+}
+
+impl fmt::Debug for CaptureDataset {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureDataset")
+            .field("metadata", &self.metadata)
+            .field("section_count", &self.sections.len())
+            .field("interface_count", &self.interfaces.len())
+            .field("packet_count", &self.packets.len())
+            .field("layer_count", &self.layers.len())
+            .field("field_count", &self.fields.len())
+            .field("diagnostic_count", &self.diagnostics.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for CaptureDatasetParts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CaptureDatasetParts")
+            .field("metadata", &self.metadata)
+            .field("section_count", &self.sections.len())
+            .field("interface_count", &self.interfaces.len())
+            .field("packet_count", &self.packets.len())
+            .field("layer_count", &self.layers.len())
+            .field("field_count", &self.fields.len())
+            .field("diagnostic_count", &self.diagnostics.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CaptureDataset {
