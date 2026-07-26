@@ -34,6 +34,14 @@ impl DiagnosticCode {
     pub const INCONSISTENT_LENGTH: Self = Self(6);
     /// A configured resource limit prevented further processing.
     pub const RESOURCE_LIMIT: Self = Self(7);
+    /// A protocol header ended before its required bytes were available.
+    pub const TRUNCATED_PROTOCOL: Self = Self(8);
+    /// Protocol bytes violate the decoded format's structural requirements.
+    pub const MALFORMED_PROTOCOL: Self = Self(9);
+    /// A recognized link or protocol envelope is outside the supported subset.
+    pub const UNSUPPORTED_ENCAPSULATION: Self = Self(10);
+    /// A well-framed protocol identifier has no decoder in this version.
+    pub const UNSUPPORTED_PROTOCOL: Self = Self(11);
 }
 
 /// Scope of the evidence attached to a diagnostic.

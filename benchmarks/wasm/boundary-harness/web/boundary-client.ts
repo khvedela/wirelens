@@ -203,8 +203,11 @@ export class BoundaryClient {
     this.worker.terminate();
   }
 
-  async capabilities(apiVersion = HARNESS_API_VERSION): Promise<Capabilities> {
-    return (await this.metadata(apiVersion)).capabilities;
+  async capabilities(apiVersion = HARNESS_API_VERSION): Promise<Required<Capabilities>> {
+    // This harness is coupled to the current production Wasm and asserts every
+    // additive field. Product API-v1 consumers still tolerate older v1 modules
+    // that do not advertise the optional decoded-arena capabilities.
+    return (await this.metadata(apiVersion)).capabilities as Required<Capabilities>;
   }
 
   #send<T>(

@@ -6,14 +6,18 @@ use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
 use crate::{
     API_VERSION, BATCH_SCHEMA_VERSION, BoundaryError, BoundaryErrorCode, BoundaryHandle,
-    BoundaryState, CAPTURE_BYTES_PER_PACKET, CAPTURE_PACKET_BASE_ALLOWANCE, DatasetDiagnostic,
-    DisposeStatus, HandleKind, ImportAdvance, ImportPhase, ImportProgressSnapshot,
-    MAX_CAPTURE_BLOCK_BYTES, MAX_CAPTURE_BYTES, MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK,
-    MAX_CAPTURE_DECODED_ITEMS_PER_STEP, MAX_CAPTURE_DIAGNOSTICS, MAX_CAPTURE_INTERFACES,
-    MAX_CAPTURE_PACKETS, MAX_CAPTURE_SECTIONS, MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES,
-    MAX_EVIDENCE_BYTES, MAX_IMPORT_HANDLES, MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS,
-    MAX_PACKET_BATCH_BYTES, MAX_PACKET_BATCH_ROWS, MAX_PACKET_CURSOR_HANDLES,
-    MAX_TOTAL_CAPTURE_BYTES, MAX_TOTAL_LOGICAL_BYTES, ResourceStats,
+    BoundaryState, CAPTURE_BYTES_PER_DECODED_FIELD, CAPTURE_BYTES_PER_DECODED_LAYER,
+    CAPTURE_BYTES_PER_FIELD_CHILD, CAPTURE_BYTES_PER_PACKET, CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
+    CAPTURE_DECODED_LAYER_BASE_ALLOWANCE, CAPTURE_FIELD_CHILD_BASE_ALLOWANCE,
+    CAPTURE_PACKET_BASE_ALLOWANCE, DatasetDiagnostic, DisposeStatus, HandleKind, ImportAdvance,
+    ImportPhase, ImportProgressSnapshot, MAX_CAPTURE_BLOCK_BYTES, MAX_CAPTURE_BYTES,
+    MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK, MAX_CAPTURE_DECODED_ITEMS_PER_STEP,
+    MAX_CAPTURE_DIAGNOSTICS, MAX_CAPTURE_FIELD_CHILDREN, MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET,
+    MAX_CAPTURE_FIELDS, MAX_CAPTURE_FIELDS_PER_PACKET, MAX_CAPTURE_INTERFACES, MAX_CAPTURE_LAYERS,
+    MAX_CAPTURE_LAYERS_PER_PACKET, MAX_CAPTURE_PACKETS, MAX_CAPTURE_SECTIONS,
+    MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES, MAX_EVIDENCE_BYTES, MAX_IMPORT_HANDLES,
+    MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS, MAX_PACKET_BATCH_BYTES, MAX_PACKET_BATCH_ROWS,
+    MAX_PACKET_CURSOR_HANDLES, MAX_TOTAL_CAPTURE_BYTES, MAX_TOTAL_LOGICAL_BYTES, ResourceStats,
     boundary::allocate_import_copy_buffer,
 };
 
@@ -186,6 +190,63 @@ pub fn capabilities() -> Result<JsValue, JsValue> {
     )?;
     set_number(&result, "maxSections", f64::from(MAX_CAPTURE_SECTIONS))?;
     set_number(&result, "maxInterfaces", f64::from(MAX_CAPTURE_INTERFACES))?;
+    set_number(
+        &result,
+        "decodedLayerAdmissionBytesPerItem",
+        f64::from(CAPTURE_BYTES_PER_DECODED_LAYER),
+    )?;
+    set_number(
+        &result,
+        "decodedLayerAdmissionBase",
+        f64::from(CAPTURE_DECODED_LAYER_BASE_ALLOWANCE),
+    )?;
+    set_number(
+        &result,
+        "decodedFieldAdmissionBytesPerItem",
+        f64::from(CAPTURE_BYTES_PER_DECODED_FIELD),
+    )?;
+    set_number(
+        &result,
+        "decodedFieldAdmissionBase",
+        f64::from(CAPTURE_DECODED_FIELD_BASE_ALLOWANCE),
+    )?;
+    set_number(
+        &result,
+        "fieldChildAdmissionBytesPerItem",
+        f64::from(CAPTURE_BYTES_PER_FIELD_CHILD),
+    )?;
+    set_number(
+        &result,
+        "fieldChildAdmissionBase",
+        f64::from(CAPTURE_FIELD_CHILD_BASE_ALLOWANCE),
+    )?;
+    set_string(
+        &result,
+        "decodedArenaAdmissionRule",
+        "min(requestedTotal, globalTotal, max(arenaBase, ceil(captureBytes / admissionBytesPerItem)))",
+    )?;
+    set_number(&result, "maxLayers", f64::from(MAX_CAPTURE_LAYERS))?;
+    set_number(
+        &result,
+        "maxLayersPerPacket",
+        f64::from(MAX_CAPTURE_LAYERS_PER_PACKET),
+    )?;
+    set_number(&result, "maxFields", f64::from(MAX_CAPTURE_FIELDS))?;
+    set_number(
+        &result,
+        "maxFieldsPerPacket",
+        f64::from(MAX_CAPTURE_FIELDS_PER_PACKET),
+    )?;
+    set_number(
+        &result,
+        "maxFieldChildren",
+        f64::from(MAX_CAPTURE_FIELD_CHILDREN),
+    )?;
+    set_number(
+        &result,
+        "maxFieldChildrenPerPacket",
+        f64::from(MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET),
+    )?;
     set_number(
         &result,
         "maxImportHandles",

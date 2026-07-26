@@ -3,9 +3,13 @@
 use core::{fmt, mem};
 
 use packet_core::{
-    CaptureDataset, CaptureImporter, Diagnostic, ImportError, ImportLimits,
+    CaptureDataset, CaptureImporter, DecodedField, Diagnostic, FieldId, ImportError, ImportLimits,
     ImportProgress as CoreImportProgress, ImportStep as CoreImportStep, InterfaceMetadata,
-    SectionMetadata, StringId, decoder_scratch_bytes_upper_bound,
+    LayerFact, SectionMetadata, StringId, decoder_scratch_bytes_upper_bound,
+};
+use protocol_decoders::{
+    LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET, LINK_LAYER_MAX_FIELDS_PER_PACKET,
+    LINK_LAYER_MAX_LAYERS_PER_PACKET, LINK_LAYER_VOCABULARY_COUNT_UPPER_BOUND, LinkLayerDecoder,
 };
 
 use crate::{
@@ -60,6 +64,33 @@ pub const MAX_CAPTURE_STRING_BYTES: u32 = 256 * 1024;
 pub const MAX_CAPTURE_SECTIONS: u32 = 1_024;
 /// Maximum interfaces retained across one browser import.
 pub const MAX_CAPTURE_INTERFACES: u32 = 16_384;
+/// Maximum decoded protocol layers retained by one browser import.
+pub const MAX_CAPTURE_LAYERS: u32 = 393_216;
+/// Maximum decoded fields retained by one browser import.
+pub const MAX_CAPTURE_FIELDS: u32 = 1_048_576;
+/// Maximum decoded field-child references retained by one browser import.
+pub const MAX_CAPTURE_FIELD_CHILDREN: u32 = 1_048_576;
+/// Maximum decoded protocol layers emitted for one packet.
+pub const MAX_CAPTURE_LAYERS_PER_PACKET: u32 = 32;
+/// Maximum decoded fields emitted for one packet.
+pub const MAX_CAPTURE_FIELDS_PER_PACKET: u32 = 1_024;
+/// Maximum field-child references emitted for one packet.
+pub const MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET: u32 = 2_048;
+/// Source-byte allowance used to derive a per-import decoded-layer ceiling.
+pub const CAPTURE_BYTES_PER_DECODED_LAYER: u32 = 250;
+/// Source-byte allowance used to derive a per-import decoded-field ceiling.
+pub const CAPTURE_BYTES_PER_DECODED_FIELD: u32 = 63;
+/// Source-byte allowance used to derive a per-import field-child ceiling.
+pub const CAPTURE_BYTES_PER_FIELD_CHILD: u32 = 84;
+/// Baseline decoded-layer allowance for the fixed small-capture packet allowance.
+pub const CAPTURE_DECODED_LAYER_BASE_ALLOWANCE: u32 =
+    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_LAYERS_PER_PACKET;
+/// Baseline decoded-field allowance for the fixed small-capture packet allowance.
+pub const CAPTURE_DECODED_FIELD_BASE_ALLOWANCE: u32 =
+    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_FIELDS_PER_PACKET;
+/// Baseline field-child allowance for the fixed small-capture packet allowance.
+pub const CAPTURE_FIELD_CHILD_BASE_ALLOWANCE: u32 =
+    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET;
 
 /// Pre-copy admission result for one complete capture input.
 ///
@@ -421,29 +452,7 @@ impl BoundaryState {
                 "capture block limit exceeds the boundary step cap",
             ));
         }
-        let limits = ImportLimits {
-            max_capture_bytes: requested_limits.max_capture_bytes.min(MAX_CAPTURE_BYTES),
-            max_block_bytes: requested_limits
-                .max_block_bytes
-                .min(MAX_CAPTURE_BLOCK_BYTES),
-            max_decoded_items_per_block: requested_limits
-                .max_decoded_items_per_block
-                .min(MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK),
-            max_decoded_items_per_step: requested_limits
-                .max_decoded_items_per_step
-                .min(MAX_CAPTURE_DECODED_ITEMS_PER_STEP),
-            max_packets: requested_limits
-                .max_packets
-                .min(packet_limit_for_capture(input_bytes)),
-            max_sections: requested_limits.max_sections.min(MAX_CAPTURE_SECTIONS),
-            max_interfaces: requested_limits.max_interfaces.min(MAX_CAPTURE_INTERFACES),
-            max_diagnostics: requested_limits
-                .max_diagnostics
-                .min(MAX_CAPTURE_DIAGNOSTICS),
-            max_string_bytes: requested_limits
-                .max_string_bytes
-                .min(MAX_CAPTURE_STRING_BYTES),
-        };
+        let limits = browser_import_limits(input_bytes, requested_limits);
         let stats = self.resource_stats()?;
         let currently_owned = stats.current_owned_capture_bytes;
         let resulting_owned_capture_bytes = currently_owned
@@ -498,7 +507,12 @@ impl BoundaryState {
         // Recheck immediately before mutation. This makes the platform-neutral
         // API safe even when callers do work between preflight and registration.
         let checked = self.admit_import_input_with_limits(input_bytes, admission.limits)?;
-        let importer = CaptureImporter::new(bytes, checked.limits).map_err(map_import_error)?;
+        let importer = CaptureImporter::new_with_decoder(
+            bytes,
+            checked.limits,
+            Box::new(LinkLayerDecoder::new()),
+        )
+        .map_err(map_import_error)?;
         let handle = self.imports.insert(ImportEntry {
             importer,
             parser_buffer_bytes_upper_bound: checked.parser_buffer_bytes_upper_bound,
@@ -714,6 +728,21 @@ impl BoundaryState {
                 u64::try_from(dataset.interfaces().len()).map_err(|_| arithmetic_error())?,
                 u64::from(MAX_CAPTURE_INTERFACES),
                 "dataset exceeds the interface limit",
+            ),
+            (
+                u64::try_from(dataset.layers().len()).map_err(|_| arithmetic_error())?,
+                u64::from(MAX_CAPTURE_LAYERS),
+                "dataset exceeds the decoded-layer limit",
+            ),
+            (
+                u64::try_from(dataset.fields().len()).map_err(|_| arithmetic_error())?,
+                u64::from(MAX_CAPTURE_FIELDS),
+                "dataset exceeds the decoded-field limit",
+            ),
+            (
+                u64::try_from(dataset.field_children().len()).map_err(|_| arithmetic_error())?,
+                u64::from(MAX_CAPTURE_FIELD_CHILDREN),
+                "dataset exceeds the field-child limit",
             ),
             (
                 u64::try_from(dataset.diagnostics().len()).map_err(|_| arithmetic_error())?,
@@ -1065,7 +1094,9 @@ impl BoundaryState {
         let (retained_packet_index_bytes, retained_index_bytes) = self.datasets.values().try_fold(
             (0_u64, 0_u64),
             |(packet_total, index_total), dataset| {
-                let packet_bytes = slice_storage_bytes(dataset.packets())?;
+                let packet_bytes = dataset
+                    .retained_packet_index_bytes()
+                    .ok_or_else(arithmetic_error)?;
                 let index_bytes = dataset
                     .retained_index_bytes()
                     .ok_or_else(arithmetic_error)?;
@@ -1586,14 +1617,11 @@ fn import_slot_index(handle: BoundaryHandle) -> Option<usize> {
     (index < MAX_IMPORT_HANDLES).then_some(index)
 }
 
-fn slice_storage_bytes<T>(slice: &[T]) -> Result<u64, BoundaryError> {
-    u64::try_from(core::mem::size_of_val(slice)).map_err(|_| arithmetic_error())
-}
-
 fn packet_index_bytes_for_limit(max_packets: u32) -> Result<u64, BoundaryError> {
-    // `Vec::try_reserve` may geometrically over-allocate before finalization
-    // converts the live prefix into an exact boxed slice.
-    arena_reservation_bytes::<packet_core::PacketRecord>(max_packets, 2)
+    // packet-core selects a cap-aware geometric target and retains at most the
+    // configured total. The eight-slot floor conservatively covers the
+    // allocator's minimum non-empty capacity for very small limits.
+    arena_reservation_bytes::<packet_core::PacketRecord>(max_packets)
 }
 
 fn parser_buffer_bytes_for_capture(
@@ -1610,11 +1638,14 @@ fn parser_buffer_bytes_for_capture(
 }
 
 fn import_auxiliary_bytes_upper_bound(limits: ImportLimits) -> Result<u64, BoundaryError> {
-    // The framing importer can intern at most one interface name per interface
-    // and one safe message per diagnostic. Arena vectors use a two-times factor
-    // to cover geometric spare capacity before they become exact boxed slices.
+    // The importer can intern at most one interface name per interface, one
+    // safe message per diagnostic, and the decoder's fixed safe vocabulary.
+    // packet-core's fixed-width arena vectors grow geometrically only up to
+    // their configured total, so one capped arena is sufficient here. The
+    // string finalization allocations remain accounted separately below.
     let string_count = u64::from(limits.max_interfaces)
         .checked_add(u64::from(limits.max_diagnostics))
+        .and_then(|count| count.checked_add(u64::from(LINK_LAYER_VOCABULARY_COUNT_UPPER_BOUND)))
         .ok_or_else(arithmetic_error)?;
     let tree_pointer_reservation = type_bytes::<usize>()?
         .checked_mul(4)
@@ -1628,14 +1659,20 @@ fn import_auxiliary_bytes_upper_bound(limits: ImportLimits) -> Result<u64, Bound
         .and_then(|bytes| bytes.checked_mul(string_count))
         .ok_or_else(arithmetic_error)?;
     let validation_scratch = u64::from(limits.max_interfaces)
-        .checked_add(u64::from(limits.max_diagnostics))
+        .checked_add(u64::from(limits.max_layers))
+        .and_then(|bytes| bytes.checked_add(u64::from(limits.max_diagnostics)))
+        .and_then(|bytes| bytes.checked_add(u64::from(limits.max_field_children)))
+        .and_then(|bytes| bytes.checked_add(u64::from(limits.max_fields).checked_mul(2)?))
         .ok_or_else(arithmetic_error)?;
 
     [
-        arena_reservation_bytes::<SectionMetadata>(limits.max_sections, 2)?,
-        arena_reservation_bytes::<InterfaceMetadata>(limits.max_interfaces, 2)?,
-        arena_reservation_bytes::<i64>(limits.max_interfaces, 2)?,
-        arena_reservation_bytes::<Diagnostic>(limits.max_diagnostics, 2)?,
+        arena_reservation_bytes::<SectionMetadata>(limits.max_sections)?,
+        arena_reservation_bytes::<InterfaceMetadata>(limits.max_interfaces)?,
+        arena_reservation_bytes::<i64>(limits.max_interfaces)?,
+        arena_reservation_bytes::<LayerFact>(limits.max_layers)?,
+        arena_reservation_bytes::<DecodedField>(limits.max_fields)?,
+        arena_reservation_bytes::<FieldId>(limits.max_field_children)?,
+        arena_reservation_bytes::<Diagnostic>(limits.max_diagnostics)?,
         decoder_scratch_bytes_upper_bound(limits.max_decoded_items_per_block)
             .ok_or_else(arithmetic_error)?,
         u64::from(limits.max_string_bytes),
@@ -1651,14 +1688,11 @@ fn import_auxiliary_bytes_upper_bound(limits: ImportLimits) -> Result<u64, Bound
     })
 }
 
-fn arena_reservation_bytes<T>(count: u32, capacity_factor: u64) -> Result<u64, BoundaryError> {
-    // Cover both geometric growth and Rust's small-Vec minimum non-zero
-    // capacity. Eight slots is conservative for every arena element width
-    // used by the pinned toolchain.
-    let slots = u64::from(count)
-        .checked_mul(capacity_factor)
-        .map(|slots| slots.max(8))
-        .ok_or_else(arithmetic_error)?;
+fn arena_reservation_bytes<T>(count: u32) -> Result<u64, BoundaryError> {
+    // Cap-aware geometric growth never requests more than `count`. Eight
+    // slots conservatively cover the allocator's minimum non-empty capacity
+    // when a caller configures a smaller logical limit.
+    let slots = u64::from(count).max(8);
     slots
         .checked_mul(type_bytes::<T>()?)
         .ok_or_else(arithmetic_error)
@@ -1748,6 +1782,73 @@ pub const fn packet_limit_for_capture(input_bytes: u64) -> u32 {
     }
 }
 
+fn browser_import_limits(input_bytes: u64, requested: ImportLimits) -> ImportLimits {
+    let layers_per_packet = requested
+        .max_layers_per_packet
+        .min(MAX_CAPTURE_LAYERS_PER_PACKET);
+    let fields_per_packet = requested
+        .max_fields_per_packet
+        .min(MAX_CAPTURE_FIELDS_PER_PACKET);
+    let children_per_packet = requested
+        .max_field_children_per_packet
+        .min(MAX_CAPTURE_FIELD_CHILDREN_PER_PACKET);
+    ImportLimits {
+        max_capture_bytes: requested.max_capture_bytes.min(MAX_CAPTURE_BYTES),
+        max_block_bytes: requested.max_block_bytes.min(MAX_CAPTURE_BLOCK_BYTES),
+        max_decoded_items_per_block: requested
+            .max_decoded_items_per_block
+            .min(MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK),
+        max_decoded_items_per_step: requested
+            .max_decoded_items_per_step
+            .min(MAX_CAPTURE_DECODED_ITEMS_PER_STEP),
+        max_packets: requested
+            .max_packets
+            .min(packet_limit_for_capture(input_bytes)),
+        max_sections: requested.max_sections.min(MAX_CAPTURE_SECTIONS),
+        max_interfaces: requested.max_interfaces.min(MAX_CAPTURE_INTERFACES),
+        max_layers: proportional_decode_limit(
+            input_bytes,
+            CAPTURE_BYTES_PER_DECODED_LAYER,
+            CAPTURE_DECODED_LAYER_BASE_ALLOWANCE,
+            requested.max_layers,
+            MAX_CAPTURE_LAYERS,
+        ),
+        max_layers_per_packet: layers_per_packet,
+        max_fields: proportional_decode_limit(
+            input_bytes,
+            CAPTURE_BYTES_PER_DECODED_FIELD,
+            CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
+            requested.max_fields,
+            MAX_CAPTURE_FIELDS,
+        ),
+        max_fields_per_packet: fields_per_packet,
+        max_field_children: proportional_decode_limit(
+            input_bytes,
+            CAPTURE_BYTES_PER_FIELD_CHILD,
+            CAPTURE_FIELD_CHILD_BASE_ALLOWANCE,
+            requested.max_field_children,
+            MAX_CAPTURE_FIELD_CHILDREN,
+        ),
+        max_field_children_per_packet: children_per_packet,
+        max_diagnostics: requested.max_diagnostics.min(MAX_CAPTURE_DIAGNOSTICS),
+        max_string_bytes: requested.max_string_bytes.min(MAX_CAPTURE_STRING_BYTES),
+    }
+}
+
+fn proportional_decode_limit(
+    input_bytes: u64,
+    bytes_per_item: u32,
+    baseline_total: u32,
+    requested_total: u32,
+    boundary_total: u32,
+) -> u32 {
+    let proportional = input_bytes.div_ceil(u64::from(bytes_per_item));
+    let proportional = u32::try_from(proportional).unwrap_or(u32::MAX);
+    requested_total
+        .min(boundary_total)
+        .min(proportional.max(baseline_total))
+}
+
 fn import_progress(progress: CoreImportProgress, phase: ImportPhase) -> ImportProgressSnapshot {
     ImportProgressSnapshot {
         phase,
@@ -1798,15 +1899,63 @@ fn map_import_error(error: ImportError) -> BoundaryError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundaryState, DisposeStatus, Registry, allocate_import_copy_buffer,
-        import_auxiliary_bytes_upper_bound, packet_index_bytes_for_limit,
-        parser_buffer_bytes_for_capture, resulting_dataset_logical_bytes,
-        resulting_import_logical_bytes,
+        BoundaryState, CAPTURE_BYTES_PER_DECODED_FIELD, CAPTURE_BYTES_PER_DECODED_LAYER,
+        CAPTURE_BYTES_PER_FIELD_CHILD, CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
+        CAPTURE_DECODED_LAYER_BASE_ALLOWANCE, CAPTURE_FIELD_CHILD_BASE_ALLOWANCE, DisposeStatus,
+        ImportAdvance, Registry, allocate_import_copy_buffer, import_auxiliary_bytes_upper_bound,
+        packet_index_bytes_for_limit, parser_buffer_bytes_for_capture, proportional_decode_limit,
+        resulting_dataset_logical_bytes, resulting_import_logical_bytes,
     };
     use crate::{
-        BoundaryErrorCode, HandleKind, ImportLimits, MAX_TOTAL_LOGICAL_BYTES,
-        handle::MAX_GENERATION,
+        BoundaryErrorCode, HandleKind, ImportLimits, MAX_CAPTURE_BYTES, MAX_IMPORT_STEP_BYTES,
+        MAX_IMPORT_STEP_RECORDS, MAX_TOTAL_LOGICAL_BYTES, handle::MAX_GENERATION,
     };
+
+    fn maximal_vlan_arp_decode() -> Vec<u8> {
+        let mut frame = Vec::with_capacity(46);
+        frame.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        frame.extend([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
+        frame.extend(0x8100_u16.to_be_bytes());
+        frame.extend(100_u16.to_be_bytes());
+        frame.extend(0x0806_u16.to_be_bytes());
+        // A non-Ethernet hardware type with otherwise complete address bytes
+        // emits the bounded ARP facts plus a structured unsupported layer.
+        frame.extend(2_u16.to_be_bytes());
+        frame.extend(0x0800_u16.to_be_bytes());
+        frame.extend([6, 4]);
+        frame.extend(1_u16.to_be_bytes());
+        frame.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        frame.extend([192, 0, 2, 1]);
+        frame.extend([0x00; 6]);
+        frame.extend([192, 0, 2, 2]);
+        assert_eq!(frame.len(), 46);
+        frame
+    }
+
+    fn repeated_legacy_pcap(frame: &[u8], packet_count: u32) -> Box<[u8]> {
+        let frame_length = u32::try_from(frame.len()).expect("synthetic frame length fits u32");
+        let packet_count = usize::try_from(packet_count).expect("packet count fits usize");
+        let mut capture = Vec::with_capacity(24 + packet_count * (16 + frame.len()));
+        capture.extend([0xd4, 0xc3, 0xb2, 0xa1]);
+        capture.extend(2_u16.to_le_bytes());
+        capture.extend(4_u16.to_le_bytes());
+        capture.extend(0_i32.to_le_bytes());
+        capture.extend(0_u32.to_le_bytes());
+        capture.extend(65_535_u32.to_le_bytes());
+        capture.extend(1_u32.to_le_bytes());
+        for packet_id in 0..packet_count {
+            capture.extend(
+                u32::try_from(packet_id)
+                    .expect("synthetic timestamp fits u32")
+                    .to_le_bytes(),
+            );
+            capture.extend(0_u32.to_le_bytes());
+            capture.extend(frame_length.to_le_bytes());
+            capture.extend(frame_length.to_le_bytes());
+            capture.extend(frame);
+        }
+        capture.into_boxed_slice()
+    }
 
     #[test]
     fn registry_retires_a_slot_before_generation_wrap() {
@@ -1935,18 +2084,178 @@ mod tests {
     }
 
     #[test]
-    fn live_vector_reservations_cover_sentinel_and_geometric_spare_capacity() {
+    fn capped_vector_reservations_cover_small_allocations_and_parser_spare_capacity() {
         let packet_bytes = u64::try_from(core::mem::size_of::<packet_core::PacketRecord>())
             .expect("packet record size is representable");
-        assert_eq!(packet_index_bytes_for_limit(7), Ok(7 * packet_bytes * 2));
+        assert_eq!(packet_index_bytes_for_limit(7), Ok(8 * packet_bytes));
         assert_eq!(packet_index_bytes_for_limit(1), Ok(8 * packet_bytes));
+        assert_eq!(packet_index_bytes_for_limit(13), Ok(13 * packet_bytes));
         assert_eq!(parser_buffer_bytes_for_capture(3, 4), Ok(8));
         assert_eq!(parser_buffer_bytes_for_capture(100, 4), Ok(10));
     }
 
     #[test]
+    fn decoded_arena_bases_respect_custom_caps_and_preserve_post_base_density() {
+        let requested = ImportLimits {
+            max_layers: 100,
+            max_layers_per_packet: 4,
+            max_fields: 200,
+            max_fields_per_packet: 25,
+            max_field_children: 100,
+            max_field_children_per_packet: 21,
+            ..ImportLimits::default()
+        };
+        let admitted = BoundaryState::new()
+            .admit_import_input_with_limits(1, requested)
+            .expect("valid caller totals remain authoritative")
+            .limits();
+        assert_eq!(admitted.max_layers, requested.max_layers);
+        assert_eq!(admitted.max_fields, requested.max_fields);
+        assert_eq!(admitted.max_field_children, requested.max_field_children);
+
+        for (baseline, density) in [
+            (
+                CAPTURE_DECODED_LAYER_BASE_ALLOWANCE,
+                CAPTURE_BYTES_PER_DECODED_LAYER,
+            ),
+            (
+                CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
+                CAPTURE_BYTES_PER_DECODED_FIELD,
+            ),
+            (
+                CAPTURE_FIELD_CHILD_BASE_ALLOWANCE,
+                CAPTURE_BYTES_PER_FIELD_CHILD,
+            ),
+        ] {
+            let first_post_base_byte = u64::from(baseline)
+                .checked_mul(u64::from(density))
+                .and_then(|value| value.checked_add(1))
+                .expect("test threshold is representable");
+            assert_eq!(
+                proportional_decode_limit(
+                    first_post_base_byte,
+                    density,
+                    baseline,
+                    u32::MAX,
+                    u32::MAX,
+                ),
+                baseline + 1
+            );
+        }
+    }
+
+    #[test]
+    fn base_allowance_imports_1024_maximal_vlan_arp_decodes_without_saturation() {
+        const PACKETS: u32 = 1_024;
+        const LAYERS_PER_PACKET: u32 = 4;
+        const FIELDS_PER_PACKET: u32 = 25;
+        const CHILDREN_PER_PACKET: u32 = 21;
+
+        let capture = repeated_legacy_pcap(&maximal_vlan_arp_decode(), PACKETS);
+        let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
+        let mut state = BoundaryState::new();
+        let admission = state
+            .admit_import_input(capture_length)
+            .expect("small-capture decode baseline is admitted");
+        assert_eq!(
+            admission.limits().max_layers,
+            CAPTURE_DECODED_LAYER_BASE_ALLOWANCE
+        );
+        assert_eq!(
+            admission.limits().max_fields,
+            CAPTURE_DECODED_FIELD_BASE_ALLOWANCE
+        );
+        assert_eq!(
+            admission.limits().max_field_children,
+            CAPTURE_FIELD_CHILD_BASE_ALLOWANCE
+        );
+
+        let import = state
+            .begin_import(capture)
+            .expect("the synthetic VLAN/ARP capture begins importing");
+        loop {
+            match state
+                .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
+                .expect("the decode baseline prevents arena saturation")
+            {
+                ImportAdvance::Progress(_) => {}
+                ImportAdvance::Ready(progress) => {
+                    assert_eq!(progress.packets_retained, u64::from(PACKETS));
+                    assert_eq!(progress.diagnostics, 0);
+                    break;
+                }
+                ImportAdvance::NeedsBudget { .. } => {
+                    panic!("the maximum boundary step budget covers every synthetic record")
+                }
+            }
+        }
+        let published = state
+            .finish_import(import)
+            .expect("the fully decoded capture publishes");
+        let dataset = state
+            .datasets
+            .get(published.dataset)
+            .expect("published dataset remains registered");
+        let packet_count = usize::try_from(PACKETS).expect("packet count fits usize");
+        let layers_per_packet = usize::try_from(LAYERS_PER_PACKET).expect("layer count fits usize");
+        let fields_per_packet = usize::try_from(FIELDS_PER_PACKET).expect("field count fits usize");
+        let children_per_packet =
+            usize::try_from(CHILDREN_PER_PACKET).expect("child count fits usize");
+        assert_eq!(dataset.packets().len(), packet_count);
+        assert_eq!(dataset.layers().len(), packet_count * layers_per_packet);
+        assert_eq!(dataset.fields().len(), packet_count * fields_per_packet);
+        assert_eq!(
+            dataset.field_children().len(),
+            packet_count * children_per_packet
+        );
+        assert!(dataset.diagnostics().is_empty());
+        assert!(
+            dataset
+                .packets()
+                .iter()
+                .all(|packet| packet.layers.length() == LAYERS_PER_PACKET)
+        );
+    }
+
+    #[test]
+    fn packet_beyond_the_maximal_decode_baseline_fails_closed_and_reclaims_import() {
+        const PACKETS: u32 = 1_025;
+        let capture = repeated_legacy_pcap(&maximal_vlan_arp_decode(), PACKETS);
+        let mut state = BoundaryState::new();
+        let import = state
+            .begin_import(capture)
+            .expect("the capture and packet metadata fit pre-copy admission");
+        let failure = state
+            .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
+            .expect_err("decoded fields beyond the exact baseline fail closed");
+        assert_eq!(failure.code(), BoundaryErrorCode::RESOURCE_LIMIT);
+        assert_eq!(
+            failure.resource_limit(),
+            Some(u64::from(CAPTURE_DECODED_FIELD_BASE_ALLOWANCE))
+        );
+        let progress = failure
+            .terminal_import_progress()
+            .expect("fatal decode saturation carries exact import progress");
+        assert_eq!(progress.phase, super::ImportPhase::Failed);
+        assert_eq!(progress.packets_retained, 1_024);
+
+        let cleanup = state
+            .resource_stats()
+            .expect("fatal import cleanup is exact");
+        assert_eq!(cleanup.active_imports, 0);
+        assert_eq!(cleanup.active_datasets, 0);
+        assert_eq!(cleanup.transient_import_input_bytes, 0);
+        assert_eq!(cleanup.current_owned_capture_bytes, 0);
+        assert_eq!(cleanup.total_logical_bytes_upper_bound, 0);
+    }
+
+    #[test]
     fn cumulative_logical_limit_includes_import_auxiliary_and_exact_dataset_bytes() {
-        let auxiliary = import_auxiliary_bytes_upper_bound(ImportLimits::default())
+        let bounded_limits = BoundaryState::new()
+            .admit_import_input_with_limits(1, ImportLimits::default())
+            .expect("the browser clamps platform-neutral defaults")
+            .limits();
+        let auxiliary = import_auxiliary_bytes_upper_bound(bounded_limits)
             .expect("default auxiliary reservation is representable");
         assert!(auxiliary > 0);
 
@@ -1972,5 +2281,14 @@ mod tests {
             dataset_error.resource_limit(),
             Some(MAX_TOTAL_LOGICAL_BYTES)
         );
+    }
+
+    #[test]
+    fn decoded_arena_reservations_preserve_the_max_capture_admission_contract() {
+        let admission = BoundaryState::new()
+            .admit_import_input_with_limits(MAX_CAPTURE_BYTES, ImportLimits::default())
+            .expect("the advertised maximum capture remains admissible in an empty boundary");
+        assert!(admission.auxiliary_bytes_upper_bound() > 0);
+        assert!(admission.resulting_logical_bytes_upper_bound() <= MAX_TOTAL_LOGICAL_BYTES);
     }
 }

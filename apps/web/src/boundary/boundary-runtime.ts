@@ -217,12 +217,34 @@ function normalizeCapabilities(value: unknown): Capabilities {
     "packetAdmissionBase",
     "packetAdmissionBytesPerPacket",
   ] as const;
+  const optionalPositiveIntegerKeys = [
+    "decodedFieldAdmissionBase",
+    "decodedFieldAdmissionBytesPerItem",
+    "decodedLayerAdmissionBase",
+    "decodedLayerAdmissionBytesPerItem",
+    "fieldChildAdmissionBase",
+    "fieldChildAdmissionBytesPerItem",
+    "maxFieldChildren",
+    "maxFieldChildrenPerPacket",
+    "maxFields",
+    "maxFieldsPerPacket",
+    "maxLayers",
+    "maxLayersPerPacket",
+  ] as const;
   const normalized = Object.fromEntries(
     positiveIntegerKeys.map((key) => [
       key,
       requiredSafeInteger(property(value, key), `capability ${key}`, 1),
     ]),
-  ) as unknown as Omit<Capabilities, "packetAdmissionRule">;
+  ) as unknown as Pick<Capabilities, (typeof positiveIntegerKeys)[number]>;
+  const optionalIntegers = Object.fromEntries(
+    optionalPositiveIntegerKeys.flatMap((key) => {
+      const candidate = property(value, key);
+      return candidate === undefined
+        ? []
+        : [[key, requiredSafeInteger(candidate, `capability ${key}`, 1)]];
+    }),
+  ) as Partial<Pick<Capabilities, (typeof optionalPositiveIntegerKeys)[number]>>;
   if (
     normalized.apiVersion !== compiledApiVersion() ||
     normalized.batchSchemaVersion !== compiledBatchSchemaVersion()
@@ -232,8 +254,18 @@ function normalizeCapabilities(value: unknown): Capabilities {
       "Wasm capability versions are inconsistent",
     );
   }
+  const decodedArenaAdmissionRule = property(value, "decodedArenaAdmissionRule");
   return {
     ...normalized,
+    ...optionalIntegers,
+    ...(decodedArenaAdmissionRule === undefined
+      ? {}
+      : {
+          decodedArenaAdmissionRule: requiredString(
+            decodedArenaAdmissionRule,
+            "capability decodedArenaAdmissionRule",
+          ),
+        }),
     packetAdmissionRule: requiredString(
       property(value, "packetAdmissionRule"),
       "capability packetAdmissionRule",

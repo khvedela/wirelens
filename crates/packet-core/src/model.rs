@@ -120,22 +120,22 @@ pub struct CaptureDataset {
     metadata: CaptureMetadata,
     /// One owned copy of the capture bytes.
     bytes: Box<[u8]>,
-    /// Section arena.
-    sections: Box<[SectionMetadata]>,
-    /// Interface arena.
-    interfaces: Box<[InterfaceMetadata]>,
-    /// Packet arena.
-    packets: Box<[PacketRecord]>,
-    /// Protocol-layer arena.
-    layers: Box<[LayerFact]>,
-    /// Hierarchical decoded-field arena.
-    fields: Box<[DecodedField]>,
+    /// Section arena. Its builder allocation is retained without a final copy.
+    sections: Vec<SectionMetadata>,
+    /// Interface arena. Its builder allocation is retained without a final copy.
+    interfaces: Vec<InterfaceMetadata>,
+    /// Packet arena. Its builder allocation is retained without a final copy.
+    packets: Vec<PacketRecord>,
+    /// Protocol-layer arena. Its builder allocation is retained without a final copy.
+    layers: Vec<LayerFact>,
+    /// Hierarchical decoded-field arena retained from the builder.
+    fields: Vec<DecodedField>,
     /// Compact child IDs referenced by decoded-field child spans.
-    field_children: Box<[FieldId]>,
-    /// Structured diagnostics arena.
-    diagnostics: Box<[Diagnostic]>,
+    field_children: Vec<FieldId>,
+    /// Structured diagnostics arena retained from the builder.
+    diagnostics: Vec<Diagnostic>,
     /// Deduplicated labels, protocol names, and safe diagnostic text.
-    strings: Box<[Box<str>]>,
+    strings: Vec<Box<str>>,
 }
 
 /// Mutable construction payload consumed exactly once into a validated dataset.
@@ -161,6 +161,24 @@ pub struct CaptureDatasetParts {
     pub diagnostics: Box<[Diagnostic]>,
     /// Deduplicated labels, protocol names, and safe diagnostic text.
     pub strings: Box<[Box<str>]>,
+}
+
+/// Crate-private construction payload that transfers builder allocations.
+///
+/// The canonical arenas remain private and immutable after construction. Using
+/// vectors here avoids shrinking each live builder arena into a second boxed
+/// allocation while both allocations contribute to the Wasm high-water mark.
+pub(crate) struct CaptureDatasetVecParts {
+    pub(crate) metadata: CaptureMetadata,
+    pub(crate) bytes: Box<[u8]>,
+    pub(crate) sections: Vec<SectionMetadata>,
+    pub(crate) interfaces: Vec<InterfaceMetadata>,
+    pub(crate) packets: Vec<PacketRecord>,
+    pub(crate) layers: Vec<LayerFact>,
+    pub(crate) fields: Vec<DecodedField>,
+    pub(crate) field_children: Vec<FieldId>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) strings: Vec<Box<str>>,
 }
 
 impl fmt::Debug for CaptureDataset {
@@ -201,6 +219,22 @@ impl CaptureDataset {
     /// Returns the first [`ModelError`] when IDs, ranges, or cross-references
     /// are inconsistent.
     pub fn from_parts(parts: CaptureDatasetParts) -> Result<Self, ModelError> {
+        Self::from_vec_parts(CaptureDatasetVecParts {
+            metadata: parts.metadata,
+            bytes: parts.bytes,
+            sections: parts.sections.into_vec(),
+            interfaces: parts.interfaces.into_vec(),
+            packets: parts.packets.into_vec(),
+            layers: parts.layers.into_vec(),
+            fields: parts.fields.into_vec(),
+            field_children: parts.field_children.into_vec(),
+            diagnostics: parts.diagnostics.into_vec(),
+            strings: parts.strings.into_vec(),
+        })
+    }
+
+    /// Transfers vector-backed builder arenas into an immutable dataset.
+    pub(crate) fn from_vec_parts(parts: CaptureDatasetVecParts) -> Result<Self, ModelError> {
         let dataset = Self {
             metadata: parts.metadata,
             bytes: parts.bytes,
@@ -285,25 +319,36 @@ impl CaptureDataset {
         })
     }
 
+    /// Returns the retained packet-index allocation in bytes.
+    ///
+    /// This counts vector capacity rather than logical length because spare
+    /// capacity remains owned by the immutable dataset.
+    #[must_use]
+    pub fn retained_packet_index_bytes(&self) -> Option<u64> {
+        arena_capacity_bytes::<PacketRecord>(self.packets.capacity())
+    }
+
     /// Returns the retained canonical index allocation in bytes.
     ///
-    /// The checked sum covers each exact-length fixed arena, the outer boxed
-    /// string arena, and all interned UTF-8 bytes. It intentionally excludes
-    /// the capture byte allocation returned by [`bytes`](Self::bytes), so
-    /// callers can report source and index retention independently. `None`
-    /// indicates that the sum cannot be represented as `u64`.
+    /// The checked sum covers the allocated capacity of every fixed-width
+    /// vector arena and the outer string vector, plus all interned UTF-8 bytes.
+    /// Capacity is used instead of length because finalization transfers the
+    /// builder vectors without shrinking them. The capture allocation returned
+    /// by [`bytes`](Self::bytes) is intentionally excluded so callers can report
+    /// source and index retention independently. `None` indicates that the sum
+    /// cannot be represented as `u64`.
     #[must_use]
     pub fn retained_index_bytes(&self) -> Option<u64> {
         let mut total = 0_u64;
         for bytes in [
-            arena_bytes(&self.sections)?,
-            arena_bytes(&self.interfaces)?,
-            arena_bytes(&self.packets)?,
-            arena_bytes(&self.layers)?,
-            arena_bytes(&self.fields)?,
-            arena_bytes(&self.field_children)?,
-            arena_bytes(&self.diagnostics)?,
-            arena_bytes(&self.strings)?,
+            arena_capacity_bytes::<SectionMetadata>(self.sections.capacity())?,
+            arena_capacity_bytes::<InterfaceMetadata>(self.interfaces.capacity())?,
+            self.retained_packet_index_bytes()?,
+            arena_capacity_bytes::<LayerFact>(self.layers.capacity())?,
+            arena_capacity_bytes::<DecodedField>(self.fields.capacity())?,
+            arena_capacity_bytes::<FieldId>(self.field_children.capacity())?,
+            arena_capacity_bytes::<Diagnostic>(self.diagnostics.capacity())?,
+            arena_capacity_bytes::<Box<str>>(self.strings.capacity())?,
         ] {
             total = total.checked_add(bytes)?;
         }
@@ -596,8 +641,8 @@ impl CaptureDataset {
     }
 }
 
-fn arena_bytes<T>(arena: &[T]) -> Option<u64> {
-    u64::try_from(arena.len())
+fn arena_capacity_bytes<T>(capacity: usize) -> Option<u64> {
+    u64::try_from(capacity)
         .ok()?
         .checked_mul(u64::try_from(size_of::<T>()).ok()?)
 }
@@ -649,4 +694,107 @@ pub enum ModelError {
     LayerFact,
     /// A diagnostic references a missing packet.
     DiagnosticScope,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_construction_retains_and_accounts_for_spare_capacity() {
+        let bytes = vec![0_u8; 64].into_boxed_slice();
+
+        let mut sections = Vec::with_capacity(7);
+        sections.push(SectionMetadata {
+            id: SectionId(0),
+            byte_range: ByteRange::new(0, 64).expect("valid section range"),
+            byte_order: ByteOrder::LittleEndian,
+            interfaces: IndexRange::new(0, 1).expect("valid interface span"),
+        });
+        let mut interfaces = Vec::with_capacity(6);
+        interfaces.push(InterfaceMetadata {
+            id: InterfaceId(0),
+            section_id: SectionId(0),
+            byte_range: ByteRange::new(0, 24).expect("valid interface range"),
+            section_index: 0,
+            link_type: LinkType(1),
+            snap_length: 65_535,
+            timestamp_resolution: TimestampResolution::Decimal(6),
+            name: None,
+        });
+        let mut packets = Vec::with_capacity(9);
+        packets.push(PacketRecord {
+            id: PacketId(0),
+            section_id: SectionId(0),
+            interface_id: InterfaceId(0),
+            timestamp: None,
+            captured_length: 8,
+            original_length: 8,
+            data: ByteRange::new(40, 8).expect("valid packet range"),
+            layers: IndexRange::default(),
+            diagnostics: IndexRange::default(),
+        });
+        let layers: Vec<LayerFact> = Vec::with_capacity(5);
+        let fields: Vec<DecodedField> = Vec::with_capacity(4);
+        let field_children: Vec<FieldId> = Vec::with_capacity(3);
+        let diagnostics: Vec<Diagnostic> = Vec::with_capacity(2);
+        let mut strings = Vec::with_capacity(8);
+        strings.push(Box::<str>::from("retained"));
+
+        assert!(packets.capacity() > packets.len());
+        assert!(strings.capacity() > strings.len());
+        let capture_allocation = bytes.as_ptr();
+        let section_allocation = sections.as_ptr();
+        let interface_allocation = interfaces.as_ptr();
+        let packet_allocation = packets.as_ptr();
+        let string_arena_allocation = strings.as_ptr();
+        let packet_bytes = arena_capacity_bytes::<PacketRecord>(packets.capacity())
+            .expect("packet capacity fits u64");
+        let retained_bytes = [
+            arena_capacity_bytes::<SectionMetadata>(sections.capacity()),
+            arena_capacity_bytes::<InterfaceMetadata>(interfaces.capacity()),
+            Some(packet_bytes),
+            arena_capacity_bytes::<LayerFact>(layers.capacity()),
+            arena_capacity_bytes::<DecodedField>(fields.capacity()),
+            arena_capacity_bytes::<FieldId>(field_children.capacity()),
+            arena_capacity_bytes::<Diagnostic>(diagnostics.capacity()),
+            arena_capacity_bytes::<Box<str>>(strings.capacity()),
+            Some(u64::try_from("retained".len()).expect("string length fits u64")),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, bytes| total.checked_add(bytes?))
+        .expect("retained capacity fits u64");
+
+        let dataset = CaptureDataset::from_vec_parts(CaptureDatasetVecParts {
+            metadata: CaptureMetadata {
+                format: CaptureFormat::Pcap,
+                byte_length: 64,
+                packet_count: 1,
+                started_at: None,
+                ended_at: None,
+            },
+            bytes,
+            sections,
+            interfaces,
+            packets,
+            layers,
+            fields,
+            field_children,
+            diagnostics,
+            strings,
+        })
+        .expect("valid vector-backed dataset");
+
+        assert_eq!(dataset.bytes.as_ptr(), capture_allocation);
+        assert_eq!(dataset.sections.as_ptr(), section_allocation);
+        assert_eq!(dataset.interfaces.as_ptr(), interface_allocation);
+        assert_eq!(dataset.packets.as_ptr(), packet_allocation);
+        assert_eq!(dataset.strings.as_ptr(), string_arena_allocation);
+        assert_eq!(dataset.retained_packet_index_bytes(), Some(packet_bytes));
+        assert_eq!(dataset.retained_index_bytes(), Some(retained_bytes));
+        assert_eq!(dataset.interned_string_bytes(), Some(8));
+        dataset
+            .validate()
+            .expect("capacity does not alter invariants");
+    }
 }

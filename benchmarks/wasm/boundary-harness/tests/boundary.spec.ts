@@ -83,15 +83,29 @@ test("loads the versioned boundary in a production module worker without externa
   expect(metadata.capabilities.apiVersion).toBe(metadata.apiVersion);
   expect(metadata.capabilities.batchSchemaVersion).toBe(metadata.batchSchemaVersion);
   expect(metadata.capabilities).toMatchObject({
+    decodedArenaAdmissionRule:
+      "min(requestedTotal, globalTotal, max(arenaBase, ceil(captureBytes / admissionBytesPerItem)))",
+    decodedFieldAdmissionBase: 25 * 1_024,
+    decodedFieldAdmissionBytesPerItem: 63,
+    decodedLayerAdmissionBase: 4 * 1_024,
+    decodedLayerAdmissionBytesPerItem: 250,
+    fieldChildAdmissionBase: 21 * 1_024,
+    fieldChildAdmissionBytesPerItem: 84,
     maxBlockBytes: 4 * 1024 * 1024,
     maxCaptureBytes: 256 * 1024 * 1024,
     maxDatasetHandles: 1_024,
     maxDecodedItemsPerBlock: 4_096,
     maxDecodedItemsPerStep: 4_096,
     maxDiagnostics: 1_024,
+    maxFieldChildren: 1_048_576,
+    maxFieldChildrenPerPacket: 2_048,
+    maxFields: 1_048_576,
+    maxFieldsPerPacket: 1_024,
     maxImportHandles: 16,
     maxInterfaces: 16_384,
     maxInternedStringBytes: 256 * 1024,
+    maxLayers: 393_216,
+    maxLayersPerPacket: 32,
     maxPacketCursorHandles: 65_536,
     maxSections: 1_024,
     maxTotalCaptureBytes: 384 * 1024 * 1024,
@@ -250,7 +264,7 @@ test("imports in bounded steps with monotonic exact progress and transferable ba
   expect(result.batchMagic).toBe("WLPKTB01");
   expect(result.batchRows).toBe(5);
   expect(result.batchStartRow).toBe("0");
-  expect(result.evidence).toEqual([2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2, 8, 0]);
+  expect(result.evidence).toEqual([2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2, 0x88, 0xb5]);
   expect(BigInt(result.memory)).toBeGreaterThan(0n);
   expect(result.stats.retainedBatchBytesHi).toBe(0);
   expect(result.stats.retainedBatchBytesLo).toBe(0);

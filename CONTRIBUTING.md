@@ -73,12 +73,14 @@ cargo test --locked -p packet-core --test import_properties
 FUZZ_NIGHTLY=nightly-2026-07-20
 rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
 cargo +"$FUZZ_NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
-for seed in fuzz/corpus/capture_import/*; do
-  cargo +"$FUZZ_NIGHTLY" fuzz run capture_import "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
+for target in capture_import protocol_decode; do
+  for seed in "fuzz/corpus/$target"/*; do
+    cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
+  done
 done
 ```
 
-The weekly workflow uses the same pinned fuzz toolchain for a ten-minute mutation campaign. Local longer runs can use `cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- -max_total_time=600 -max_len=4096 -timeout=2 -rss_limit_mb=1024`. Keep corpus additions small and synthetic, and record their provenance and intent in [`fixtures/manifests`](fixtures/manifests).
+The weekly workflow uses the same pinned fuzz toolchain for bounded importer and protocol-decoder mutation campaigns. A local longer run can replace `capture_import` and its corpus path in `cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- -max_total_time=600 -max_len=4096 -timeout=2 -rss_limit_mb=1024` with `protocol_decode` as needed. Keep corpus additions small and synthetic, and record their provenance and intent in [`fixtures/manifests`](fixtures/manifests).
 
 ## Changes and review
 

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 packet-core = { path = "../packet-core", version = "0.1.0" }
+protocol-decoders = { path = "../protocol-decoders", version = "0.1.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "=0.3.103", default-features = false }

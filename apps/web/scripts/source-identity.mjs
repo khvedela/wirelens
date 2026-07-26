@@ -10,6 +10,7 @@ const sourceRoots = [
   "rust-toolchain.toml",
   "apps/web",
   "crates/packet-core",
+  "crates/protocol-decoders",
   "crates/wasm-adapter",
   "benchmarks/wasm/boundary-harness/API.md",
   "benchmarks/wasm/boundary-harness/scripts",

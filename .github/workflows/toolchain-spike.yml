@@ -132,7 +132,7 @@ jobs:
 
   fuzz-corpus-replay:
     if: github.event_name == 'pull_request'
-    name: Replay bounded synthetic importer corpus
+    name: Replay bounded synthetic importer and decoder corpora
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -152,14 +152,16 @@ jobs:
 
       - name: Replay each committed synthetic seed once
         run: |
-          for seed in fuzz/corpus/capture_import/*; do
-            test -f "$seed"
-            cargo +"$FUZZ_NIGHTLY" fuzz run capture_import "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
+          for target in capture_import protocol_decode; do
+            for seed in "fuzz/corpus/$target"/*; do
+              test -f "$seed"
+              cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
+            done
           done
 
   fuzz-scheduled-campaign:
     if: github.event_name == 'schedule'
-    name: Run scheduled capture importer fuzz campaign
+    name: Run scheduled capture importer and protocol decoder fuzz campaigns
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -180,7 +182,13 @@ jobs:
       - name: Run bounded scheduled campaign
         run: |
           cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- \
-            -max_total_time=600 \
+            -max_total_time=300 \
+            -max_len=4096 \
+            -timeout=2 \
+            -rss_limit_mb=1024 \
+            -print_final_stats=1
+          cargo +"$FUZZ_NIGHTLY" fuzz run protocol_decode fuzz/corpus/protocol_decode -- \
+            -max_total_time=300 \
             -max_len=4096 \
             -timeout=2 \
             -rss_limit_mb=1024 \

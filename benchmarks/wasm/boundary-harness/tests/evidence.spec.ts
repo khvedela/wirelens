@@ -53,7 +53,10 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
 
   const evidence = await page.evaluate(async () => {
     const DENSE_RECORDS = 60_000;
-    const DENSE_PAYLOAD_BYTES = 224;
+    // Keep the memory reference on the large-capture path with ordinary
+    // near-MTU Ethernet records. The unknown EtherType still exercises the
+    // production link decoder without inventing higher-layer payloads.
+    const DENSE_PAYLOAD_BYTES = 1_440;
     const SPARSE_RECORDS = 256;
     const SPARSE_PAYLOAD_BYTES = 60_000;
     const REPEATED_SESSIONS = 6;
@@ -513,6 +516,7 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
         finalizationDurationMs: denseImport.finalizationDurationMs,
         inputDetached: denseBegun.inputDetached,
         logicalBytesRatioToCapture: denseResident.retainedLogicalBytes / denseCaptureBytes,
+        payloadBytes: DENSE_PAYLOAD_BYTES,
         records: DENSE_RECORDS,
         resident: denseResident,
         stepDurationsMs: denseImport.stepDurationsMs,

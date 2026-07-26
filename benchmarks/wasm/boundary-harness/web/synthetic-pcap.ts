@@ -48,10 +48,14 @@ export function createSyntheticPcap(options: SyntheticCaptureOptions = {}): Uint
     view.setUint32(offset + 12, capturedLength, true);
     offset += RECORD_HEADER_BYTES;
 
-    bytes.set([0x02, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 2, 0x08, 0x00], offset);
-    for (let payloadIndex = 0; payloadIndex < payloadBytes; payloadIndex += 1) {
-      bytes[offset + ETHERNET_HEADER_BYTES + payloadIndex] = (index + payloadIndex) & 0xff;
-    }
+    // Keep boundary/performance data higher-layer neutral as more decoders
+    // arrive. Dedicated decoder fixtures carry valid IPv4/IPv6 payloads.
+    bytes.set([0x02, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 2, 0x88, 0xb5], offset);
+    bytes.fill(
+      index & 0xff,
+      offset + ETHERNET_HEADER_BYTES,
+      offset + ETHERNET_HEADER_BYTES + payloadBytes,
+    );
     offset += capturedLength;
   }
   return bytes;

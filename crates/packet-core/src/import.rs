@@ -16,15 +16,17 @@ use pcap_parser::{
     traits::PcapReaderIterator,
 };
 
+use crate::model::CaptureDatasetVecParts;
 use crate::{
-    ByteOrder, ByteRange, CaptureDataset, CaptureDatasetParts, CaptureFormat, CaptureMetadata,
-    CaptureTimestamp, Diagnostic, DiagnosticCode, DiagnosticScope, IndexRange, InterfaceId,
-    InterfaceMetadata, LinkType, ModelError, PacketId, PacketRecord, Recovery, SectionId,
-    SectionMetadata, Severity, StringId, TimestampResolution,
+    ByteOrder, ByteRange, CaptureDataset, CaptureFormat, CaptureMetadata, CaptureTimestamp,
+    DecodedField, Diagnostic, DiagnosticCode, DiagnosticScope, FieldId, FieldValue, IndexRange,
+    InterfaceId, InterfaceMetadata, LayerFact, LinkType, ModelError, PacketId, PacketRecord,
+    Recovery, SectionId, SectionMetadata, Severity, StringId, TimestampResolution,
 };
 
 const DEFAULT_BUFFER_BYTES: usize = 64 * 1024;
 const DEFAULT_DECODED_ITEMS_PER_BLOCK: u32 = 4_096;
+const MIN_ARENA_CAPACITY: usize = 8;
 const MIN_DIAGNOSTIC_STRING_BYTES: usize = 1024;
 const PCAPNG_SHB_TYPE: u32 = 0x0a0d_0d0a;
 const PCAPNG_IDB_TYPE: u32 = 0x0000_0001;
@@ -71,6 +73,18 @@ pub struct ImportLimits {
     pub max_interfaces: u32,
     /// Maximum structured diagnostics.
     pub max_diagnostics: u32,
+    /// Maximum protocol layers retained across the capture.
+    pub max_layers: u32,
+    /// Maximum protocol layers retained for one packet.
+    pub max_layers_per_packet: u32,
+    /// Maximum decoded fields retained across the capture.
+    pub max_fields: u32,
+    /// Maximum decoded fields retained for one packet.
+    pub max_fields_per_packet: u32,
+    /// Maximum child references retained across the capture.
+    pub max_field_children: u32,
+    /// Maximum child references retained for one packet.
+    pub max_field_children_per_packet: u32,
     /// Maximum bytes owned by the string interner.
     pub max_string_bytes: u32,
 }
@@ -86,6 +100,12 @@ impl Default for ImportLimits {
             max_sections: 4_096,
             max_interfaces: 65_536,
             max_diagnostics: 4_096,
+            max_layers: 8_000_000,
+            max_layers_per_packet: 64,
+            max_fields: 32_000_000,
+            max_fields_per_packet: 4_096,
+            max_field_children: 32_000_000,
+            max_field_children_per_packet: 8_192,
             max_string_bytes: 1024 * 1024,
         }
     }
@@ -124,6 +144,18 @@ pub enum ImportLimitKind {
     Interfaces,
     /// Structured diagnostics.
     Diagnostics,
+    /// Protocol-layer facts across the capture.
+    Layers,
+    /// Protocol-layer facts for one packet.
+    LayersPerPacket,
+    /// Decoded fields across the capture.
+    Fields,
+    /// Decoded fields for one packet.
+    FieldsPerPacket,
+    /// Field-child references across the capture.
+    FieldChildren,
+    /// Field-child references for one packet.
+    FieldChildrenPerPacket,
     /// Interned safe text.
     StringBytes,
 }
@@ -210,12 +242,388 @@ pub enum ImportStep {
     Ready(ImportProgress),
 }
 
+/// Borrowed packet bytes and metadata supplied to one protocol decode.
+///
+/// `bytes` is valid only for the duration of [`PacketDecoder::decode`]. The
+/// corresponding [`Self::data_range`] remains an absolute range into the
+/// capture allocation retained by the completed dataset.
+#[derive(Clone, Copy, Debug)]
+pub struct PacketDecodeInput<'a> {
+    packet_id: PacketId,
+    link_type: LinkType,
+    data_range: ByteRange,
+    bytes: &'a [u8],
+}
+
+impl<'a> PacketDecodeInput<'a> {
+    /// Returns the stable packet identity being decoded.
+    #[must_use]
+    pub const fn packet_id(self) -> PacketId {
+        self.packet_id
+    }
+
+    /// Returns the capture-interface link type for this packet.
+    #[must_use]
+    pub const fn link_type(self) -> LinkType {
+        self.link_type
+    }
+
+    /// Returns the packet's absolute range in the capture allocation.
+    #[must_use]
+    pub const fn data_range(self) -> ByteRange {
+        self.data_range
+    }
+
+    /// Returns the packet bytes borrowed from the active framing step.
+    #[must_use]
+    pub const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+}
+
+/// Platform-neutral protocol decoder invoked while a framed packet slice is live.
+pub trait PacketDecoder {
+    /// Decodes one packet into the bounded canonical arenas exposed by `sink`.
+    ///
+    /// Returning an error rolls back every layer, field, child reference,
+    /// diagnostic, and string created by this invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted import, resource, arithmetic, or model error.
+    fn decode(
+        &mut self,
+        input: PacketDecodeInput<'_>,
+        sink: &mut PacketDecodeSink<'_>,
+    ) -> Result<(), ImportError>;
+}
+
+/// Bounded append-only view of the canonical decode arenas for one packet.
+///
+/// Field parents must be appended before their children. Add a parent with
+/// [`Self::add_field`], append its descendants, then establish its consecutive
+/// child span with [`Self::set_field_children`].
+pub struct PacketDecodeSink<'a> {
+    builder: &'a mut DatasetBuilder,
+    packet_id: PacketId,
+    packet_range: ByteRange,
+    layer_start: usize,
+    field_start: usize,
+    child_start: usize,
+}
+
+impl PacketDecodeSink<'_> {
+    /// Interns a protocol identifier, field label, value, or safe diagnostic message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a string resource-limit or arithmetic error.
+    pub fn intern(&mut self, value: &str) -> Result<StringId, ImportError> {
+        self.builder.intern(value)
+    }
+
+    /// Appends one initially childless field owned by this packet decode.
+    ///
+    /// The evidence range and any byte-reference value must remain within the
+    /// packet range. `name` and string values must already be interned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field resource-limit, range, string, or arithmetic error.
+    pub fn add_field(
+        &mut self,
+        name: StringId,
+        value: FieldValue,
+        byte_range: ByteRange,
+    ) -> Result<FieldId, ImportError> {
+        self.validate_string_id(name)?;
+        if let FieldValue::String(id) = value {
+            self.validate_string_id(id)?;
+        }
+        if !range_contains(self.packet_range, byte_range)
+            || matches!(value, FieldValue::Bytes(range) if !range_contains(self.packet_range, range))
+        {
+            return Err(ImportError::Model(ModelError::ByteRange));
+        }
+        self.ensure_per_packet_capacity(
+            self.builder.fields.len(),
+            self.field_start,
+            self.builder.limits.max_fields_per_packet,
+            ImportLimitKind::FieldsPerPacket,
+        )?;
+        Self::ensure_total_additional_capacity(
+            self.builder.fields.len(),
+            1,
+            self.builder.limits.max_fields,
+            ImportLimitKind::Fields,
+            byte_range.start(),
+        )?;
+        reserve_arena(
+            &mut self.builder.fields,
+            1,
+            ImportLimitKind::Fields,
+            self.builder.limits.max_fields,
+            byte_range.start(),
+        )?;
+        let id =
+            FieldId(u32::try_from(self.builder.fields.len()).map_err(|_| ImportError::Arithmetic)?);
+        self.builder.fields.push(DecodedField {
+            name,
+            value,
+            byte_range,
+            children: IndexRange::default(),
+        });
+        Ok(id)
+    }
+
+    /// Assigns the consecutive children of a parent created by this decode.
+    ///
+    /// Every child must have been appended after `parent`, remain inside the
+    /// parent's byte range, and not already belong to another parent or layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a hierarchy, resource-limit, or arithmetic error.
+    pub fn set_field_children(
+        &mut self,
+        parent: FieldId,
+        children: &[FieldId],
+    ) -> Result<(), ImportError> {
+        let parent_index = self.local_field_index(parent)?;
+        let parent_field = self.builder.fields[parent_index];
+        if parent_field.children.length() != 0 {
+            return Err(ImportError::Model(ModelError::FieldHierarchy));
+        }
+        let child_count = u32::try_from(children.len()).map_err(|_| ImportError::Arithmetic)?;
+        self.ensure_per_packet_additional_capacity(
+            self.builder.field_children.len(),
+            self.child_start,
+            child_count,
+            self.builder.limits.max_field_children_per_packet,
+            ImportLimitKind::FieldChildrenPerPacket,
+        )?;
+        Self::ensure_total_additional_capacity(
+            self.builder.field_children.len(),
+            child_count,
+            self.builder.limits.max_field_children,
+            ImportLimitKind::FieldChildren,
+            parent_field.byte_range.start(),
+        )?;
+        let start = u32::try_from(self.builder.field_children.len())
+            .map_err(|_| ImportError::Arithmetic)?;
+        let assigned_children = &self.builder.field_children[self.child_start..];
+        let packet_layers = &self.builder.layers[self.layer_start..];
+        for (position, child) in children.iter().copied().enumerate() {
+            let child_index = self.local_field_index(child)?;
+            if child.0 <= parent.0
+                || children[..position].contains(&child)
+                || assigned_children.contains(&child)
+                || packet_layers
+                    .iter()
+                    .any(|layer| layer.root_field == Some(child))
+                || !range_contains(
+                    parent_field.byte_range,
+                    self.builder.fields[child_index].byte_range,
+                )
+            {
+                return Err(ImportError::Model(ModelError::FieldHierarchy));
+            }
+        }
+        reserve_arena(
+            &mut self.builder.field_children,
+            children.len(),
+            ImportLimitKind::FieldChildren,
+            self.builder.limits.max_field_children,
+            parent_field.byte_range.start(),
+        )?;
+        self.builder.field_children.extend_from_slice(children);
+        self.builder.fields[parent_index].children =
+            IndexRange::new(start, child_count).ok_or(ImportError::Arithmetic)?;
+        Ok(())
+    }
+
+    /// Appends one protocol layer owned by this packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a layer resource-limit, hierarchy, range, string, or arithmetic error.
+    pub fn add_layer(
+        &mut self,
+        protocol: StringId,
+        byte_range: ByteRange,
+        root_field: Option<FieldId>,
+    ) -> Result<(), ImportError> {
+        self.validate_string_id(protocol)?;
+        if !range_contains(self.packet_range, byte_range) {
+            return Err(ImportError::Model(ModelError::ByteRange));
+        }
+        if let Some(root) = root_field {
+            let root_index = self.local_field_index(root)?;
+            if !range_contains(byte_range, self.builder.fields[root_index].byte_range)
+                || self.builder.field_children[self.child_start..].contains(&root)
+                || self.builder.layers[self.layer_start..]
+                    .iter()
+                    .any(|layer| layer.root_field == Some(root))
+            {
+                return Err(ImportError::Model(ModelError::FieldHierarchy));
+            }
+        }
+        self.ensure_per_packet_capacity(
+            self.builder.layers.len(),
+            self.layer_start,
+            self.builder.limits.max_layers_per_packet,
+            ImportLimitKind::LayersPerPacket,
+        )?;
+        Self::ensure_total_additional_capacity(
+            self.builder.layers.len(),
+            1,
+            self.builder.limits.max_layers,
+            ImportLimitKind::Layers,
+            byte_range.start(),
+        )?;
+        reserve_arena(
+            &mut self.builder.layers,
+            1,
+            ImportLimitKind::Layers,
+            self.builder.limits.max_layers,
+            byte_range.start(),
+        )?;
+        self.builder.layers.push(LayerFact {
+            protocol,
+            byte_range,
+            root_field,
+        });
+        Ok(())
+    }
+
+    /// Appends one packet-scoped structured diagnostic.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic resource-limit, range, string, or arithmetic error.
+    pub fn add_diagnostic(
+        &mut self,
+        code: DiagnosticCode,
+        severity: Severity,
+        recovery: Recovery,
+        byte_range: Option<ByteRange>,
+        message: StringId,
+    ) -> Result<(), ImportError> {
+        self.validate_string_id(message)?;
+        if byte_range.is_some_and(|range| !range_contains(self.packet_range, range)) {
+            return Err(ImportError::Model(ModelError::ByteRange));
+        }
+        self.builder.ensure_diagnostic_capacity(
+            byte_range.map_or(self.packet_range.start(), ByteRange::start),
+        )?;
+        self.builder.diagnostics.push(Diagnostic {
+            code,
+            severity,
+            scope: DiagnosticScope::Packet(self.packet_id),
+            byte_range,
+            message,
+            recovery,
+        });
+        Ok(())
+    }
+
+    fn validate_string_id(&self, id: StringId) -> Result<(), ImportError> {
+        if (id.0 as usize) < self.builder.strings.len() {
+            Ok(())
+        } else {
+            Err(ImportError::Model(ModelError::StringId))
+        }
+    }
+
+    fn local_field_index(&self, id: FieldId) -> Result<usize, ImportError> {
+        let index = id.0 as usize;
+        if index >= self.field_start && index < self.builder.fields.len() {
+            Ok(index)
+        } else {
+            Err(ImportError::Model(ModelError::FieldHierarchy))
+        }
+    }
+
+    fn ensure_per_packet_capacity(
+        &self,
+        current: usize,
+        start: usize,
+        limit: u32,
+        kind: ImportLimitKind,
+    ) -> Result<(), ImportError> {
+        self.ensure_per_packet_additional_capacity(current, start, 1, limit, kind)
+    }
+
+    fn ensure_per_packet_additional_capacity(
+        &self,
+        current: usize,
+        start: usize,
+        additional: u32,
+        limit: u32,
+        kind: ImportLimitKind,
+    ) -> Result<(), ImportError> {
+        let retained = current.checked_sub(start).ok_or(ImportError::Arithmetic)?;
+        let projected = u64::try_from(retained)
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_add(u64::from(additional))
+            .ok_or(ImportError::Arithmetic)?;
+        if projected > u64::from(limit) {
+            return Err(ImportError::ResourceLimit {
+                kind,
+                limit: u64::from(limit),
+                offset: self.packet_range.start(),
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_total_additional_capacity(
+        current: usize,
+        additional: u32,
+        limit: u32,
+        kind: ImportLimitKind,
+        offset: u64,
+    ) -> Result<(), ImportError> {
+        let projected = u64::try_from(current)
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_add(u64::from(additional))
+            .ok_or(ImportError::Arithmetic)?;
+        if projected > u64::from(limit) {
+            return Err(ImportError::ResourceLimit {
+                kind,
+                limit: u64::from(limit),
+                offset,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_complete(&self) -> Result<(), ImportError> {
+        for field_index in self.field_start..self.builder.fields.len() {
+            let id = FieldId(u32::try_from(field_index).map_err(|_| ImportError::Arithmetic)?);
+            let parent_count = self.builder.field_children[self.child_start..]
+                .iter()
+                .filter(|candidate| **candidate == id)
+                .count();
+            let root_count = self.builder.layers[self.layer_start..]
+                .iter()
+                .filter(|layer| layer.root_field == Some(id))
+                .count();
+            if parent_count > 1 || root_count > 1 || (parent_count == 0) != (root_count == 1) {
+                return Err(ImportError::Model(ModelError::FieldHierarchy));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Incremental importer whose temporary parser views never escape a step.
 pub struct CaptureImporter {
     source: Arc<Box<[u8]>>,
     reader: Option<CaptureReader>,
     read_limit: Arc<AtomicUsize>,
     builder: DatasetBuilder,
+    decoder: Option<Box<dyn PacketDecoder + Send>>,
     limits: ImportLimits,
     complete: bool,
     consumed_bytes: u64,
@@ -244,6 +652,31 @@ impl CaptureImporter {
     /// Returns a redacted header, truncation, limit, or arithmetic error before
     /// retaining any parser view.
     pub fn new(bytes: Box<[u8]>, limits: ImportLimits) -> Result<Self, ImportError> {
+        Self::new_internal(bytes, limits, None)
+    }
+
+    /// Creates an importer that invokes `decoder` for every retained packet.
+    ///
+    /// Packet bytes remain borrowed from the active parser step and cannot
+    /// escape [`PacketDecoder::decode`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted header, truncation, limit, or arithmetic error before
+    /// retaining any parser view.
+    pub fn new_with_decoder(
+        bytes: Box<[u8]>,
+        limits: ImportLimits,
+        decoder: Box<dyn PacketDecoder + Send>,
+    ) -> Result<Self, ImportError> {
+        Self::new_internal(bytes, limits, Some(decoder))
+    }
+
+    fn new_internal(
+        bytes: Box<[u8]>,
+        limits: ImportLimits,
+        decoder: Option<Box<dyn PacketDecoder + Send>>,
+    ) -> Result<Self, ImportError> {
         validate_limits(limits)?;
         let byte_length = u64::try_from(bytes.len()).map_err(|_| ImportError::Arithmetic)?;
         if byte_length > limits.max_capture_bytes || byte_length > u64::from(u32::MAX) {
@@ -274,6 +707,7 @@ impl CaptureImporter {
             reader: Some(reader),
             read_limit,
             builder,
+            decoder,
             limits,
             complete: false,
             consumed_bytes: 0,
@@ -455,7 +889,12 @@ impl CaptureImporter {
                     }
 
                     let block_start = self.consumed_bytes;
-                    let outcome = self.builder.process(block_start, offset, block)?;
+                    let outcome = self.builder.process(
+                        block_start,
+                        offset,
+                        block,
+                        self.decoder.as_deref_mut(),
+                    )?;
                     if matches!(outcome, ProcessOutcome::StopMalformed) {
                         self.stop_malformed(block_start, offset)?;
                         return Ok(ImportStep::Ready(self.progress()));
@@ -649,6 +1088,12 @@ fn validate_limits(limits: ImportLimits) -> Result<(), ImportError> {
         || limits.max_sections == 0
         || limits.max_interfaces == 0
         || limits.max_diagnostics == 0
+        || limits.max_layers_per_packet == 0
+        || limits.max_layers < limits.max_layers_per_packet
+        || limits.max_fields_per_packet == 0
+        || limits.max_fields < limits.max_fields_per_packet
+        || limits.max_field_children_per_packet == 0
+        || limits.max_field_children < limits.max_field_children_per_packet
         || usize::try_from(limits.max_string_bytes)
             .ok()
             .is_none_or(|bytes| bytes < MIN_DIAGNOSTIC_STRING_BYTES)
@@ -1136,6 +1581,9 @@ struct DatasetBuilder {
     interfaces: Vec<InterfaceMetadata>,
     interface_offsets: Vec<i64>,
     packets: Vec<PacketRecord>,
+    layers: Vec<LayerFact>,
+    fields: Vec<DecodedField>,
+    field_children: Vec<FieldId>,
     diagnostics: Vec<Diagnostic>,
     strings: BTreeMap<Box<str>, StringId>,
     string_bytes: usize,
@@ -1158,6 +1606,16 @@ struct OpenSection {
     declared_end: Option<u64>,
 }
 
+#[derive(Clone, Copy)]
+struct DecodeCheckpoint {
+    layers: usize,
+    fields: usize,
+    field_children: usize,
+    diagnostics: usize,
+    strings: usize,
+    string_bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcessOutcome {
     Continue,
@@ -1173,6 +1631,9 @@ impl DatasetBuilder {
             interfaces: Vec::new(),
             interface_offsets: Vec::new(),
             packets: Vec::new(),
+            layers: Vec::new(),
+            fields: Vec::new(),
+            field_children: Vec::new(),
             diagnostics: Vec::new(),
             strings: BTreeMap::new(),
             string_bytes: 0,
@@ -1192,6 +1653,7 @@ impl DatasetBuilder {
         block_start: u64,
         parsed_length: usize,
         block: PcapBlockOwned<'_>,
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
     ) -> Result<ProcessOutcome, ImportError> {
         match block {
             PcapBlockOwned::LegacyHeader(header) => {
@@ -1199,9 +1661,11 @@ impl DatasetBuilder {
                 Ok(ProcessOutcome::Continue)
             }
             PcapBlockOwned::Legacy(packet) => {
-                self.process_legacy_packet(block_start, parsed_length, &packet)
+                self.process_legacy_packet(block_start, parsed_length, &packet, decoder)
             }
-            PcapBlockOwned::NG(block) => self.process_pcapng(block_start, parsed_length, block),
+            PcapBlockOwned::NG(block) => {
+                self.process_pcapng(block_start, parsed_length, block, decoder)
+            }
         }
     }
 
@@ -1298,6 +1762,7 @@ impl DatasetBuilder {
         block_start: u64,
         parsed_length: usize,
         packet: &pcap_parser::LegacyPcapBlock<'_>,
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
     ) -> Result<ProcessOutcome, ImportError> {
         if !self.legacy_initialized {
             return Ok(ProcessOutcome::StopMalformed);
@@ -1316,9 +1781,11 @@ impl DatasetBuilder {
             .checked_add(header_length)
             .ok_or(ImportError::Arithmetic)?;
         let data = ByteRange::new(data_start, packet.caplen).ok_or(ImportError::Arithmetic)?;
-        let diagnostic_start =
-            u32::try_from(self.diagnostics.len()).map_err(|_| ImportError::Arithmetic)?;
-        if packet.caplen > self.interfaces[0].snap_length || packet.caplen > packet.origlen {
+        let layer_start = u32::try_from(self.layers.len()).map_err(|_| ImportError::Arithmetic)?;
+        let (diagnostic_start, retrying_packet) = self.packet_diagnostic_start(packet_id)?;
+        if !retrying_packet
+            && (packet.caplen > self.interfaces[0].snap_length || packet.caplen > packet.origlen)
+        {
             self.add_packet_diagnostic(
                 packet_id,
                 DiagnosticCode::INCONSISTENT_LENGTH,
@@ -1333,7 +1800,7 @@ impl DatasetBuilder {
             resolution,
         )
         .ok();
-        if timestamp.is_none() {
+        if !retrying_packet && timestamp.is_none() {
             self.add_packet_diagnostic(
                 packet_id,
                 DiagnosticCode::INVALID_TIMESTAMP,
@@ -1341,6 +1808,17 @@ impl DatasetBuilder {
                 MESSAGE_INVALID_TIMESTAMP,
             )?;
         }
+        self.decode_packet(
+            packet_id,
+            self.interfaces[0].link_type,
+            data,
+            packet.data,
+            decoder,
+        )?;
+        let layer_count = u32::try_from(self.layers.len())
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_sub(layer_start)
+            .ok_or(ImportError::Arithmetic)?;
         let diagnostic_count = u32::try_from(self.diagnostics.len())
             .map_err(|_| ImportError::Arithmetic)?
             .checked_sub(diagnostic_start)
@@ -1353,7 +1831,7 @@ impl DatasetBuilder {
             captured_length: packet.caplen,
             original_length: packet.origlen,
             data,
-            layers: IndexRange::default(),
+            layers: IndexRange::new(layer_start, layer_count).ok_or(ImportError::Arithmetic)?,
             diagnostics: IndexRange::new(diagnostic_start, diagnostic_count)
                 .ok_or(ImportError::Arithmetic)?,
         });
@@ -1365,6 +1843,7 @@ impl DatasetBuilder {
         block_start: u64,
         parsed_length: usize,
         block: Block<'_>,
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
     ) -> Result<ProcessOutcome, ImportError> {
         let (declared, trailing) = ng_block_lengths(&block);
         if declared < 12
@@ -1394,10 +1873,10 @@ impl DatasetBuilder {
                 self.process_interface(block_start, declared, &interface)
             }
             Block::EnhancedPacket(packet) => {
-                self.process_enhanced_packet(block_start, declared, &packet)
+                self.process_enhanced_packet(block_start, declared, &packet, decoder)
             }
             Block::SimplePacket(packet) => {
-                self.process_simple_packet(block_start, declared, &packet)
+                self.process_simple_packet(block_start, declared, &packet, decoder)
             }
             Block::NameResolution(_)
             | Block::InterfaceStatistics(_)
@@ -1552,6 +2031,7 @@ impl DatasetBuilder {
         block_start: u64,
         block_length: u32,
         packet: &pcap_parser::EnhancedPacketBlock<'_>,
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
     ) -> Result<ProcessOutcome, ImportError> {
         let Some(section) = self.current_section else {
             return Ok(ProcessOutcome::StopMalformed);
@@ -1584,11 +2064,12 @@ impl DatasetBuilder {
             PacketId(u32::try_from(self.packets.len()).map_err(|_| ImportError::Arithmetic)?);
         let data_start = block_start.checked_add(28).ok_or(ImportError::Arithmetic)?;
         let data = ByteRange::new(data_start, packet.caplen).ok_or(ImportError::Arithmetic)?;
-        let diagnostic_start =
-            u32::try_from(self.diagnostics.len()).map_err(|_| ImportError::Arithmetic)?;
+        let layer_start = u32::try_from(self.layers.len()).map_err(|_| ImportError::Arithmetic)?;
+        let (diagnostic_start, retrying_packet) = self.packet_diagnostic_start(packet_id)?;
         let interface = self.interfaces[global_index];
-        if (interface.snap_length != 0 && packet.caplen > interface.snap_length)
-            || packet.caplen > packet.origlen
+        if !retrying_packet
+            && ((interface.snap_length != 0 && packet.caplen > interface.snap_length)
+                || packet.caplen > packet.origlen)
         {
             self.add_packet_diagnostic(
                 packet_id,
@@ -1603,7 +2084,7 @@ impl DatasetBuilder {
             interface.timestamp_resolution,
             self.interface_offsets[global_index],
         );
-        if timestamp.is_none() {
+        if !retrying_packet && timestamp.is_none() {
             self.add_packet_diagnostic(
                 packet_id,
                 DiagnosticCode::INVALID_TIMESTAMP,
@@ -1611,6 +2092,15 @@ impl DatasetBuilder {
                 MESSAGE_INVALID_TIMESTAMP,
             )?;
         }
+        let captured = packet
+            .data
+            .get(..packet.caplen as usize)
+            .ok_or(ImportError::Arithmetic)?;
+        self.decode_packet(packet_id, interface.link_type, data, captured, decoder)?;
+        let layer_count = u32::try_from(self.layers.len())
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_sub(layer_start)
+            .ok_or(ImportError::Arithmetic)?;
         let diagnostic_count = u32::try_from(self.diagnostics.len())
             .map_err(|_| ImportError::Arithmetic)?
             .checked_sub(diagnostic_start)
@@ -1623,7 +2113,7 @@ impl DatasetBuilder {
             captured_length: packet.caplen,
             original_length: packet.origlen,
             data,
-            layers: IndexRange::default(),
+            layers: IndexRange::new(layer_start, layer_count).ok_or(ImportError::Arithmetic)?,
             diagnostics: IndexRange::new(diagnostic_start, diagnostic_count)
                 .ok_or(ImportError::Arithmetic)?,
         });
@@ -1635,6 +2125,7 @@ impl DatasetBuilder {
         block_start: u64,
         block_length: u32,
         packet: &pcap_parser::SimplePacketBlock<'_>,
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
     ) -> Result<ProcessOutcome, ImportError> {
         let Some(section) = self.current_section else {
             return Ok(ProcessOutcome::StopMalformed);
@@ -1673,6 +2164,21 @@ impl DatasetBuilder {
             captured_length,
         )
         .ok_or(ImportError::Arithmetic)?;
+        let layer_start = u32::try_from(self.layers.len()).map_err(|_| ImportError::Arithmetic)?;
+        let (diagnostic_start, _) = self.packet_diagnostic_start(packet_id)?;
+        let captured = packet
+            .data
+            .get(..captured_length as usize)
+            .ok_or(ImportError::Arithmetic)?;
+        self.decode_packet(packet_id, interface.link_type, data, captured, decoder)?;
+        let layer_count = u32::try_from(self.layers.len())
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_sub(layer_start)
+            .ok_or(ImportError::Arithmetic)?;
+        let diagnostic_count = u32::try_from(self.diagnostics.len())
+            .map_err(|_| ImportError::Arithmetic)?
+            .checked_sub(diagnostic_start)
+            .ok_or(ImportError::Arithmetic)?;
         self.push_packet(PacketRecord {
             id: packet_id,
             section_id: interface.section_id,
@@ -1681,12 +2187,9 @@ impl DatasetBuilder {
             captured_length,
             original_length: packet.origlen,
             data,
-            layers: IndexRange::default(),
-            diagnostics: IndexRange::new(
-                u32::try_from(self.diagnostics.len()).map_err(|_| ImportError::Arithmetic)?,
-                0,
-            )
-            .ok_or(ImportError::Arithmetic)?,
+            layers: IndexRange::new(layer_start, layer_count).ok_or(ImportError::Arithmetic)?,
+            diagnostics: IndexRange::new(diagnostic_start, diagnostic_count)
+                .ok_or(ImportError::Arithmetic)?,
         });
         Ok(ProcessOutcome::Continue)
     }
@@ -1816,6 +2319,75 @@ impl DatasetBuilder {
             self.limits.max_packets,
             offset,
         )
+    }
+
+    fn packet_diagnostic_start(&self, packet_id: PacketId) -> Result<(u32, bool), ImportError> {
+        let mut start = self.diagnostics.len();
+        while start > 0 && self.diagnostics[start - 1].scope == DiagnosticScope::Packet(packet_id) {
+            start -= 1;
+        }
+        Ok((
+            u32::try_from(start).map_err(|_| ImportError::Arithmetic)?,
+            start != self.diagnostics.len(),
+        ))
+    }
+
+    fn decode_packet(
+        &mut self,
+        packet_id: PacketId,
+        link_type: LinkType,
+        data_range: ByteRange,
+        bytes: &[u8],
+        decoder: Option<&mut (dyn PacketDecoder + Send + '_)>,
+    ) -> Result<(), ImportError> {
+        let Some(decoder) = decoder else {
+            return Ok(());
+        };
+        if usize::try_from(data_range.length()).ok() != Some(bytes.len()) {
+            return Err(ImportError::Model(ModelError::ByteRange));
+        }
+        let checkpoint = DecodeCheckpoint {
+            layers: self.layers.len(),
+            fields: self.fields.len(),
+            field_children: self.field_children.len(),
+            diagnostics: self.diagnostics.len(),
+            strings: self.strings.len(),
+            string_bytes: self.string_bytes,
+        };
+        let input = PacketDecodeInput {
+            packet_id,
+            link_type,
+            data_range,
+            bytes,
+        };
+        let result = {
+            let mut sink = PacketDecodeSink {
+                builder: self,
+                packet_id,
+                packet_range: data_range,
+                layer_start: checkpoint.layers,
+                field_start: checkpoint.fields,
+                child_start: checkpoint.field_children,
+            };
+            decoder
+                .decode(input, &mut sink)
+                .and_then(|()| sink.validate_complete())
+        };
+        if let Err(error) = result {
+            self.rollback_decode(checkpoint);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn rollback_decode(&mut self, checkpoint: DecodeCheckpoint) {
+        self.layers.truncate(checkpoint.layers);
+        self.fields.truncate(checkpoint.fields);
+        self.field_children.truncate(checkpoint.field_children);
+        self.diagnostics.truncate(checkpoint.diagnostics);
+        self.strings
+            .retain(|_, id| (id.0 as usize) < checkpoint.strings);
+        self.string_bytes = checkpoint.string_bytes;
     }
 
     fn push_packet(&mut self, packet: PacketRecord) {
@@ -1989,17 +2561,17 @@ impl DatasetBuilder {
             started_at: self.started_at,
             ended_at: self.ended_at,
         };
-        CaptureDataset::from_parts(CaptureDatasetParts {
+        CaptureDataset::from_vec_parts(CaptureDatasetVecParts {
             metadata,
             bytes,
-            sections: self.sections.into_boxed_slice(),
-            interfaces: self.interfaces.into_boxed_slice(),
-            packets: self.packets.into_boxed_slice(),
-            layers: Box::default(),
-            fields: Box::default(),
-            field_children: Box::default(),
-            diagnostics: self.diagnostics.into_boxed_slice(),
-            strings: strings.into_boxed_slice(),
+            sections: self.sections,
+            interfaces: self.interfaces,
+            packets: self.packets,
+            layers: self.layers,
+            fields: self.fields,
+            field_children: self.field_children,
+            diagnostics: self.diagnostics,
+            strings,
         })
         .map_err(ImportError::Model)
     }
@@ -2055,13 +2627,46 @@ fn reserve_arena<T>(
     limit: u32,
     offset: u64,
 ) -> Result<(), ImportError> {
+    let resource_limit = || ImportError::ResourceLimit {
+        kind,
+        limit: u64::from(limit),
+        offset,
+    };
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let required = arena
+        .len()
+        .checked_add(additional)
+        .ok_or(ImportError::Arithmetic)?;
+    if arena.capacity() > limit {
+        return Err(ImportError::OwnershipInvariant);
+    }
+    if required > limit {
+        return Err(resource_limit());
+    }
+    if required <= arena.capacity() {
+        return Ok(());
+    }
+
+    // Grow geometrically so repeated single-item appends remain amortized,
+    // but clamp the requested capacity to the caller's hard arena ceiling.
+    // `try_reserve_exact` avoids `Vec` applying a second geometric growth
+    // policy after this cap-aware target has been selected.
+    let target = required
+        .max(arena.capacity().saturating_mul(2))
+        .max(MIN_ARENA_CAPACITY)
+        .min(limit);
+    let reservation = target
+        .checked_sub(arena.len())
+        .ok_or(ImportError::Arithmetic)?;
     arena
-        .try_reserve(additional)
-        .map_err(|_| ImportError::ResourceLimit {
-            kind,
-            limit: u64::from(limit),
-            offset,
-        })
+        .try_reserve_exact(reservation)
+        .map_err(|_| resource_limit())?;
+    if arena.capacity() > limit {
+        // Allocators may legally satisfy an exact request with more storage.
+        // Refuse to publish an arena whose retained capacity exceeds its cap.
+        return Err(ImportError::OwnershipInvariant);
+    }
+    Ok(())
 }
 
 fn checked_range(start: u64, length: u64) -> Result<Option<ByteRange>, ImportError> {
@@ -2071,4 +2676,62 @@ fn checked_range(start: u64, length: u64) -> Result<Option<ByteRange>, ImportErr
 
 fn range_to_end(start: u64, end: u64) -> Result<Option<ByteRange>, ImportError> {
     checked_range(start, end.saturating_sub(start))
+}
+
+fn range_contains(container: ByteRange, child: ByteRange) -> bool {
+    child.start() >= container.start() && child.end() <= container.end()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImportError, ImportLimitKind, reserve_arena};
+
+    #[test]
+    fn arena_growth_is_geometric_and_clamped_to_a_non_power_of_two_limit() {
+        const LIMIT: u32 = 13;
+        let mut arena = Vec::<u64>::new();
+        let mut capacity_changes = 0;
+
+        for value in 0..LIMIT {
+            let prior_capacity = arena.capacity();
+            reserve_arena(
+                &mut arena,
+                1,
+                ImportLimitKind::Packets,
+                LIMIT,
+                u64::from(value),
+            )
+            .expect("an item within the configured arena limit is admitted");
+            if arena.capacity() != prior_capacity {
+                capacity_changes += 1;
+            }
+            assert!(arena.capacity() <= LIMIT as usize);
+            arena.push(u64::from(value));
+        }
+
+        assert_eq!(arena.len(), LIMIT as usize);
+        assert_eq!(arena.capacity(), LIMIT as usize);
+        assert!(
+            capacity_changes <= 3,
+            "geometric reservation must not grow once per append"
+        );
+    }
+
+    #[test]
+    fn arena_growth_reports_the_original_hostile_input_limit_error() {
+        let mut arena = Vec::<u64>::new();
+        let error = reserve_arena(&mut arena, 14, ImportLimitKind::Packets, 13, 99)
+            .expect_err("a reservation beyond the hard total is rejected");
+
+        assert_eq!(
+            error,
+            ImportError::ResourceLimit {
+                kind: ImportLimitKind::Packets,
+                limit: 13,
+                offset: 99,
+            }
+        );
+        assert!(arena.is_empty());
+        assert_eq!(arena.capacity(), 0);
+    }
 }
