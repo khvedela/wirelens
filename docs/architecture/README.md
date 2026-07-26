@@ -35,3 +35,4 @@ The initial architecture issue must produce an ADR that defines browser/native r
 - [ADR-0001: v0.1 offline architecture boundaries and engineering constraints](./adr-0001-v0.1-boundaries.md)
 - [ADR-0002: repository and workspace structure map](./adr-0002-repository-workspace-structure.md)
 - [ADR-0003: verification, fixture, fuzzing, and benchmark strategy](./adr-0003-verification-fixture-fuzz-benchmark-strategy.md)
+- [ADR-0004: capture-container framing library](./adr-0004-capture-framing-library.md)
