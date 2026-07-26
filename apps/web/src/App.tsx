@@ -1,0 +1,78 @@
+import { CaptureImporter } from "./features/capture-import/CaptureImporter";
+import type {
+  CaptureImportModel,
+  CaptureSelectionRejection,
+} from "./features/capture-import/import-state";
+
+const BOOTING_MODEL: CaptureImportModel = { phase: "booting" };
+const NOOP = (): void => undefined;
+const NOOP_FILE = (_file: File): void => undefined;
+const NOOP_REJECTION = (_rejection: CaptureSelectionRejection): void => undefined;
+
+export interface AppProps {
+  readonly importModel?: CaptureImportModel;
+  readonly onCancelImport?: () => void;
+  readonly onFileSelected?: (file: File) => void;
+  readonly onResetImport?: () => void;
+  readonly onSelectionRejected?: (rejection: CaptureSelectionRejection) => void;
+}
+
+export function App({
+  importModel = BOOTING_MODEL,
+  onCancelImport = NOOP,
+  onFileSelected = NOOP_FILE,
+  onResetImport = NOOP,
+  onSelectionRejected = NOOP_REJECTION,
+}: AppProps) {
+  return (
+    <div className="app-shell">
+      <header className="site-header">
+        <div className="site-header__inner">
+          <div className="wordmark">
+            <span className="wordmark-mark" aria-hidden="true">
+              <span />
+            </span>
+            <span>WireLens</span>
+          </div>
+          <span className="local-badge">
+            <span aria-hidden="true" />
+            Local analysis
+          </span>
+        </div>
+      </header>
+
+      <main id="main-content" className="import-page">
+        <section className="import-introduction" aria-labelledby="page-title">
+          <p className="page-kicker">Private packet analysis</p>
+          <h1 id="page-title">Open a packet capture</h1>
+          <p className="page-lede">
+            Choose a PCAP or PCAPNG file to inspect locally, without sending capture data to a
+            server.
+          </p>
+          <aside className="privacy-notice" data-testid="privacy-notice" aria-label="Privacy">
+            <span className="privacy-notice__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                <path d="M12 3 5.5 5.5v5.8c0 4.2 2.7 7.9 6.5 9.7 3.8-1.8 6.5-5.5 6.5-9.7V5.5L12 3Z" />
+                <path d="m9.2 12 1.8 1.8 3.9-4" />
+              </svg>
+            </span>
+            <div>
+              <strong>Your capture stays on this device</strong>
+              <p>WireLens analyzes it in this browser and does not upload or save the file.</p>
+            </div>
+          </aside>
+        </section>
+
+        <CaptureImporter
+          model={importModel}
+          onCancel={onCancelImport}
+          onFileSelected={onFileSelected}
+          onReset={onResetImport}
+          onSelectionRejected={onSelectionRejected}
+        />
+      </main>
+    </div>
+  );
+}
+
+export default App;

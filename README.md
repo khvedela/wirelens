@@ -4,7 +4,7 @@
 
 **Inspect PCAP files locally, reconstruct network flows, and understand protocol behavior through a modern interactive interface.**
 
-> **Status:** the capture model, bounded PCAP/PCAPNG importer, and production Wasm boundary are implemented. The user-facing importer and investigation interface are still under construction, so WireLens is not yet a usable packet analyzer.
+> **Status:** the capture model, production Wasm boundary, and user-facing local PCAP/PCAPNG importer are implemented. Packet decoding and the investigation interface are still under construction, so WireLens is not yet a complete packet analyzer.
 
 ## The problem
 
@@ -16,7 +16,7 @@ WireLens will be a privacy-first network investigation application for networkin
 
 ## Why Rust and WebAssembly
 
-Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. WireLens compiles its platform-neutral capture core to WebAssembly and runs it in a module Web Worker. Accepted architecture decisions define crate ownership, browser boundaries, the capture-framing library, canonical model, and reproducible worker/Wasm build contract. The current boundary’s throughput, memory, cancellation, transfer, and cleanup measurements are recorded in the [Wasm boundary evidence](benchmarks/wasm/boundary-harness/EVIDENCE.md).
+Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. WireLens compiles its platform-neutral capture core to WebAssembly and runs it in a module Web Worker. Accepted architecture decisions define crate ownership, browser boundaries, the capture-framing library, canonical model, and reproducible worker/Wasm build contract. The current boundary’s throughput, memory, cancellation, transfer, and cleanup measurements are recorded in the [Wasm boundary evidence](benchmarks/wasm/boundary-harness/EVIDENCE.md). Browser file acquisition, responsiveness, privacy, and cancellation results are recorded separately in the [browser-ingestion evidence](benchmarks/browser-ingestion/EVIDENCE.md).
 
 ## Privacy first
 
@@ -41,6 +41,7 @@ Packet data can contain credentials, identifiers, private conversations, and pro
 - An immutable canonical capture/packet model with exact timestamps, byte ranges, diagnostics, sections, and interfaces.
 - A versioned, generational-handle Wasm API with cooperative cancellation, monotonic progress, deterministic cleanup, structured warnings/errors, and bounded binary packet batches.
 - A production module-worker harness that blocks external traffic and verifies detached binary transfers in Chromium and Firefox CI.
+- An accessible React file picker and drag-and-drop importer that validates capture magic, reads and parses only in a module worker, reports separate read/parse progress, cancels cooperatively, and retains no raw capture in browser storage.
 
 ## Accepted v0.1 architecture
 
@@ -77,7 +78,7 @@ flowchart TB
 wirelens/
 ├── crates/                  # Rust workspace crates, added incrementally per ADR-0002
 ├── apps/
-│   └── web/                 # Future browser application
+│   └── web/                 # React application, module worker, and browser acceptance tests
 ├── fixtures/                # Synthetic or explicitly redistributable captures
 ├── benchmarks/              # Parser, flow, Wasm, and UI performance fixtures
 ├── docs/                    # Product, architecture, and roadmap documentation
@@ -107,6 +108,24 @@ Dates remain evidence-driven rather than speculative. See [the detailed roadmap]
 - IPv4/IPv6 fragment reassembly, TCP payload reassembly, or decryption
 - Multi-user collaboration or cloud synchronization
 - Claiming heuristic conclusions as certainty
+
+## Run the browser importer locally
+
+Use the pinned Node.js, pnpm, and Rust toolchains, then build the local Wasm asset before starting
+Vite:
+
+```sh
+cd apps/web
+corepack pnpm install --frozen-lockfile
+corepack pnpm run build:wasm
+corepack pnpm run dev
+```
+
+Run the complete frontend gate—including Biome formatting/linting, deterministic fixture tests,
+privacy checks, the production build, and Chromium/Firefox acceptance tests—with
+`corepack pnpm run verify`. Qualifying near-cap evidence is intentionally separate; its exact
+reproduction command is documented in
+[`benchmarks/browser-ingestion/EVIDENCE.md`](benchmarks/browser-ingestion/EVIDENCE.md).
 
 ## Contributing
 

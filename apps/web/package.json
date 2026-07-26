@@ -1,0 +1,42 @@
+{
+  "name": "@wirelens/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.18.0",
+    "pnpm": "11.17.0"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "build:wasm": "node ../../benchmarks/wasm/boundary-harness/scripts/build-wasm.mjs",
+    "build:web": "vite build",
+    "dev": "vite --host 127.0.0.1",
+    "evidence": "node scripts/evidence.mjs",
+    "evidence:check": "node scripts/evidence.mjs --render-only --check-committed",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "preview": "vite preview --host 127.0.0.1 --port 4175 --strictPort",
+    "test": "corepack pnpm run verify",
+    "test:browser": "playwright test",
+    "test:browser:evidence": "playwright test --config playwright.evidence.config.ts",
+    "test:fixtures": "node --test tests/support/capture-fixtures.node.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "corepack pnpm run build:wasm && corepack pnpm run format:check && corepack pnpm run lint && corepack pnpm run test:fixtures && corepack pnpm run typecheck && corepack pnpm run verify:privacy && corepack pnpm run evidence:check && corepack pnpm run build:web && corepack pnpm run test:browser",
+    "verify:privacy": "node scripts/verify-privacy.mjs"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.5",
+    "@playwright/test": "1.62.0",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "typescript": "6.0.3",
+    "vite": "8.1.5"
+  }
+}
