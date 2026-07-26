@@ -64,11 +64,11 @@ flowchart TB
     Flow --> Analysis
 ```
 
-## Proposed repository structure
+## Repository structure map
 
 ```text
 wirelens/
-├── crates/                  # Future platform-neutral Rust workspace crates
+├── crates/                  # Future Rust workspace crates (see ADR-0002 responsibilities)
 ├── apps/
 │   └── web/                 # Future browser application
 ├── fixtures/                # Synthetic or explicitly redistributable captures
@@ -77,7 +77,7 @@ wirelens/
 └── .github/                 # Contribution and issue templates
 ```
 
-This structure is a proposal, not a commitment. No application source code exists yet.
+This structure is the accepted repository/workspace map for upcoming initialization work. See [ADR-0002](docs/architecture/adr-0002-repository-workspace-structure.md) for crate responsibilities, dependency direction, naming conventions, and boundary guardrails.
 
 ## Roadmap
 
