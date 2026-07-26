@@ -3,12 +3,65 @@ use core::mem::size_of;
 use packet_core::{
     ByteOrder, ByteRange, CaptureDataset, CaptureDatasetParts, CaptureFormat, CaptureMetadata,
     CaptureTimestamp, DecodedField, Diagnostic, DiagnosticCode, DiagnosticScope, FieldId,
-    FieldValue, IndexRange, InterfaceId, InterfaceMetadata, LinkType, PacketId, PacketRecord,
-    Recovery, SectionId, SectionMetadata, Severity, StringId, TimestampError, TimestampResolution,
+    FieldValue, IndexRange, InterfaceId, InterfaceMetadata, LayerFact, LinkType, ModelError,
+    PacketId, PacketRecord, Recovery, SectionId, SectionMetadata, Severity, StringId,
+    TimestampError, TimestampResolution,
 };
 
 fn range(start: u64, length: u32) -> ByteRange {
     ByteRange::new(start, length).expect("test range must be valid")
+}
+
+fn single_packet_parts(timestamp: Option<CaptureTimestamp>) -> CaptureDatasetParts {
+    let timestamp_resolution = timestamp.map_or(
+        TimestampResolution::Decimal(6),
+        CaptureTimestamp::resolution,
+    );
+    CaptureDatasetParts {
+        metadata: CaptureMetadata {
+            format: CaptureFormat::Pcap,
+            byte_length: 100,
+            packet_count: 1,
+            started_at: timestamp,
+            ended_at: timestamp,
+        },
+        bytes: vec![0; 100].into_boxed_slice(),
+        sections: vec![SectionMetadata {
+            id: SectionId(0),
+            byte_range: range(0, 100),
+            byte_order: ByteOrder::LittleEndian,
+            interfaces: IndexRange::new(0, 1).expect("valid interface span"),
+        }]
+        .into_boxed_slice(),
+        interfaces: vec![InterfaceMetadata {
+            id: InterfaceId(0),
+            section_id: SectionId(0),
+            byte_range: range(0, 24),
+            section_index: 0,
+            link_type: LinkType(1),
+            snap_length: 65_535,
+            timestamp_resolution,
+            name: None,
+        }]
+        .into_boxed_slice(),
+        packets: vec![PacketRecord {
+            id: PacketId(0),
+            section_id: SectionId(0),
+            interface_id: InterfaceId(0),
+            timestamp,
+            captured_length: 20,
+            original_length: 20,
+            data: range(40, 20),
+            layers: IndexRange::default(),
+            diagnostics: IndexRange::default(),
+        }]
+        .into_boxed_slice(),
+        layers: Box::default(),
+        fields: Box::default(),
+        field_children: Box::default(),
+        diagnostics: Box::default(),
+        strings: Box::default(),
+    }
 }
 
 #[test]
@@ -30,7 +83,171 @@ fn timestamps_retain_decimal_and_binary_resolution() {
         CaptureTimestamp::new(0, 1_000_000, TimestampResolution::Decimal(6)),
         Err(TimestampError::FractionOutOfRange)
     );
+    let high_resolution = CaptureTimestamp::new(
+        0,
+        u64::MAX,
+        TimestampResolution::Decimal(TimestampResolution::MAX_EXPONENT),
+    )
+    .expect("a 64-bit counter remains exact below a 10^-127 denominator");
+    assert_eq!(high_resolution.fraction(), u64::MAX);
+    assert_eq!(
+        high_resolution.resolution(),
+        TimestampResolution::Decimal(127)
+    );
+    assert_eq!(
+        CaptureTimestamp::new(0, 0, TimestampResolution::Binary(128)),
+        Err(TimestampError::UnsupportedResolution)
+    );
     assert_eq!(TimestampResolution::Decimal(20).ticks_per_second(), None);
+}
+
+#[test]
+fn high_resolution_timestamp_extrema_are_compared_exactly() {
+    let decimal = CaptureTimestamp::new(0, 1, TimestampResolution::Decimal(20))
+        .expect("valid high decimal resolution");
+    let binary = CaptureTimestamp::new(0, 1, TimestampResolution::Binary(64))
+        .expect("valid high binary resolution");
+    // 10^-20 is earlier than 2^-64; neither denominator fits in u64.
+    assert!(decimal.cmp_instant(binary).is_lt());
+    let dataset = CaptureDataset::from_parts(CaptureDatasetParts {
+        metadata: CaptureMetadata {
+            format: CaptureFormat::PcapNg,
+            byte_length: 100,
+            packet_count: 2,
+            started_at: Some(decimal),
+            ended_at: Some(binary),
+        },
+        bytes: vec![0; 100].into_boxed_slice(),
+        sections: vec![SectionMetadata {
+            id: SectionId(0),
+            byte_range: range(0, 100),
+            byte_order: ByteOrder::LittleEndian,
+            interfaces: IndexRange::new(0, 2).expect("valid interface span"),
+        }]
+        .into_boxed_slice(),
+        interfaces: vec![
+            InterfaceMetadata {
+                id: InterfaceId(0),
+                section_id: SectionId(0),
+                byte_range: range(0, 20),
+                section_index: 0,
+                link_type: LinkType(1),
+                snap_length: 65_535,
+                timestamp_resolution: decimal.resolution(),
+                name: None,
+            },
+            InterfaceMetadata {
+                id: InterfaceId(1),
+                section_id: SectionId(0),
+                byte_range: range(20, 20),
+                section_index: 1,
+                link_type: LinkType(1),
+                snap_length: 65_535,
+                timestamp_resolution: binary.resolution(),
+                name: None,
+            },
+        ]
+        .into_boxed_slice(),
+        packets: vec![
+            PacketRecord {
+                id: PacketId(0),
+                section_id: SectionId(0),
+                interface_id: InterfaceId(1),
+                timestamp: Some(binary),
+                captured_length: 10,
+                original_length: 10,
+                data: range(40, 10),
+                layers: IndexRange::default(),
+                diagnostics: IndexRange::default(),
+            },
+            PacketRecord {
+                id: PacketId(1),
+                section_id: SectionId(0),
+                interface_id: InterfaceId(0),
+                timestamp: Some(decimal),
+                captured_length: 10,
+                original_length: 10,
+                data: range(50, 10),
+                layers: IndexRange::default(),
+                diagnostics: IndexRange::default(),
+            },
+        ]
+        .into_boxed_slice(),
+        layers: Box::default(),
+        fields: Box::default(),
+        field_children: Box::default(),
+        diagnostics: Box::default(),
+        strings: Box::default(),
+    })
+    .expect("exact comparison accepts the true extrema");
+
+    assert_eq!(dataset.metadata().started_at, Some(decimal));
+    assert_eq!(dataset.metadata().ended_at, Some(binary));
+}
+
+#[test]
+fn validation_rejects_false_timestamp_extrema_and_interface_evidence() {
+    let timestamp =
+        CaptureTimestamp::new(10, 1, TimestampResolution::Decimal(6)).expect("valid timestamp");
+    let mut parts = single_packet_parts(Some(timestamp));
+    parts.metadata.ended_at = None;
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::TimestampBounds)
+    );
+
+    let mut parts = single_packet_parts(None);
+    parts.interfaces[0].byte_range = range(90, 20);
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::ByteRange)
+    );
+
+    let mut parts = single_packet_parts(None);
+    parts.interfaces[0].timestamp_resolution = TimestampResolution::Decimal(128);
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::TimestampResolution)
+    );
+}
+
+#[test]
+fn packet_arena_spans_have_exclusive_scope_correct_ownership() {
+    let mut parts = single_packet_parts(None);
+    parts.metadata.packet_count = 2;
+    parts.layers = vec![LayerFact {
+        protocol: StringId(0),
+        byte_range: range(40, 10),
+        root_field: None,
+    }]
+    .into_boxed_slice();
+    parts.strings = vec![Box::from("ethernet")].into_boxed_slice();
+    parts.packets[0].layers = IndexRange::new(0, 1).expect("valid layer span");
+    let mut second = parts.packets[0];
+    second.id = PacketId(1);
+    second.layers = IndexRange::new(0, 1).expect("overlapping layer span");
+    parts.packets = vec![parts.packets[0], second].into_boxed_slice();
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::ArenaOwnership)
+    );
+
+    let mut parts = single_packet_parts(None);
+    parts.packets[0].diagnostics = IndexRange::new(0, 1).expect("valid diagnostic span");
+    parts.diagnostics = vec![Diagnostic {
+        code: DiagnosticCode::TRUNCATED_RECORD,
+        severity: Severity::Warning,
+        scope: DiagnosticScope::Capture,
+        byte_range: Some(range(40, 10)),
+        message: StringId(0),
+        recovery: Recovery::Continued,
+    }]
+    .into_boxed_slice();
+    parts.strings = vec![Box::from("capture warning")].into_boxed_slice();
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::ArenaOwnership)
+    );
 }
 
 #[test]
@@ -66,6 +283,7 @@ fn dataset_models_multi_interface_capture_and_packet_identity() {
             InterfaceMetadata {
                 id: InterfaceId(0),
                 section_id: SectionId(0),
+                byte_range: range(0, 20),
                 section_index: 0,
                 link_type: LinkType(1),
                 snap_length: 65_535,
@@ -75,6 +293,7 @@ fn dataset_models_multi_interface_capture_and_packet_identity() {
             InterfaceMetadata {
                 id: InterfaceId(1),
                 section_id: SectionId(0),
+                byte_range: range(20, 20),
                 section_index: 1,
                 link_type: LinkType(101),
                 snap_length: 4_096,
@@ -140,6 +359,7 @@ fn validation_rejects_cross_section_interface_references() {
         interfaces: vec![InterfaceMetadata {
             id: InterfaceId(0),
             section_id: SectionId(0),
+            byte_range: range(0, 20),
             section_index: 0,
             link_type: LinkType(1),
             snap_length: 65_535,
@@ -197,25 +417,25 @@ fn decoded_fields_form_a_forward_hierarchy_with_byte_evidence() {
         DecodedField {
             name: StringId(0),
             value: FieldValue::None,
-            byte_range: range(14, 20),
+            byte_range: range(40, 20),
             children: IndexRange::new(0, 2).expect("valid child span"),
         },
         DecodedField {
             name: StringId(1),
             value: FieldValue::Unsigned(4),
-            byte_range: range(14, 1),
+            byte_range: range(40, 4),
             children: IndexRange::new(2, 1).expect("valid grandchild span"),
         },
         DecodedField {
             name: StringId(2),
-            value: FieldValue::Bytes(range(26, 4)),
-            byte_range: range(26, 4),
+            value: FieldValue::Bytes(range(50, 4)),
+            byte_range: range(50, 4),
             children: IndexRange::default(),
         },
         DecodedField {
             name: StringId(3),
             value: FieldValue::Boolean(true),
-            byte_range: range(15, 1),
+            byte_range: range(41, 1),
             children: IndexRange::default(),
         },
     ];
@@ -226,6 +446,21 @@ fn decoded_fields_form_a_forward_hierarchy_with_byte_evidence() {
     assert_eq!(child_ids[fields[0].children.start() as usize], FieldId(1));
     assert_eq!(child_ids[fields[1].children.start() as usize], FieldId(3));
     assert!(fields[1].byte_range.is_within(fields[0].byte_range.end()));
+
+    let mut parts = single_packet_parts(None);
+    parts.packets[0].layers = IndexRange::new(0, 1).expect("valid layer span");
+    parts.layers = vec![LayerFact {
+        protocol: StringId(4),
+        byte_range: range(40, 20),
+        root_field: Some(FieldId(0)),
+    }]
+    .into_boxed_slice();
+    parts.fields = fields.into();
+    parts.field_children = child_ids.into();
+    parts.strings = ["root", "version", "address", "flag", "ipv4"]
+        .map(Box::from)
+        .into();
+    CaptureDataset::from_parts(parts).expect("valid field tree has one layer-owned root");
 }
 
 #[test]

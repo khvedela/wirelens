@@ -20,6 +20,7 @@ The canonical model lives in platform-neutral `packet-core` and is an immutable,
 - dataset-local integer IDs and consecutive arena ranges instead of object references;
 - deduplicated strings for protocol/field labels and safe diagnostic text;
 - exact timestamps retaining decimal or binary source resolution;
+- interface-definition byte ranges retaining the evidence for link type, snap length, and timestamp resolution;
 - packet facts separated from future derived flow/analysis facts.
 
 The Rust types and invariant tests are implemented under `crates/packet-core`. The crate has no DOM, browser, JavaScript, WebAssembly, React, or UI dependency.
@@ -29,11 +30,11 @@ Its debug representation reports only counts and metadata; it never formats capt
 
 `PacketId` is a stable zero-based dataset-local identity. Presentation layers may display `id + 1`, but sorting, filtering, and cross-view selection must retain the stable ID.
 
-`CaptureTimestamp` stores whole Unix seconds, fractional ticks, and the original `TimestampResolution`. Fractions must be normalized below one second. Decimal (`10^-n`) and binary (`2^-n`) PCAPNG resolutions remain distinguishable; conversion for display must not replace the canonical value.
+`CaptureTimestamp` stores whole Unix seconds, fractional ticks, and the original `TimestampResolution`. Invariant-preserving construction keeps fractions normalized below one second. All seven-bit PCAPNG decimal (`10^-n`) and binary (`2^-n`) exponents remain valid even when their denominators exceed `u64`; exact fixed-width comparison avoids lossy floating-point conversion. Capture start/end metadata is validated against the true extrema of retained packet timestamps. Conversion for display must not replace the canonical value.
 
 ## Evidence and field semantics
 
-All byte ranges are absolute, half-open `[start, end)` offsets into the owned capture buffer. A decoded field owns a span in a separate compact child-ID arena, so arbitrary hierarchies remain representable without a heap allocation per node. Validation rejects cycles, duplicate parents, overlapping spans, and orphan child slots. Raw or unsupported values remain referenceable as byte ranges.
+All byte ranges are absolute, half-open `[start, end)` offsets into the owned capture buffer. Interface definitions retain their source header or block range, and packet layer ranges must remain within their packet evidence. A decoded field owns a span in a separate compact child-ID arena, so arbitrary hierarchies remain representable without a heap allocation per node. Validation rejects cycles, duplicate parents, overlapping packet-owned arena spans, cross-packet diagnostic scope, and orphan child or root nodes. Raw or unsupported values remain referenceable as byte ranges.
 
 `LayerFact` is protocol-extensible: an interned protocol identifier, evidence range, and optional field-tree root describe link, network, transport, and later application layers without embedding frontend view models.
 

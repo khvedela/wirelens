@@ -76,6 +76,8 @@ pub struct InterfaceMetadata {
     pub id: InterfaceId,
     /// Parent section.
     pub section_id: SectionId,
+    /// Source bytes defining this interface (or the legacy PCAP header).
+    pub byte_range: ByteRange,
     /// Interface ordinal within its section.
     pub section_index: u32,
     /// Raw link-type registry value.
@@ -302,6 +304,19 @@ impl CaptureDataset {
         if self.metadata.packet_count != self.packets.len() as u64 {
             return Err(ModelError::PacketCount);
         }
+        let mut earliest = None;
+        let mut latest = None;
+        for timestamp in self.packets.iter().filter_map(|packet| packet.timestamp) {
+            if earliest.is_none_or(|current| timestamp.cmp_instant(current).is_lt()) {
+                earliest = Some(timestamp);
+            }
+            if latest.is_none_or(|current| timestamp.cmp_instant(current).is_gt()) {
+                latest = Some(timestamp);
+            }
+        }
+        if self.metadata.started_at != earliest || self.metadata.ended_at != latest {
+            return Err(ModelError::TimestampBounds);
+        }
         Ok(())
     }
 
@@ -348,8 +363,14 @@ impl CaptureDataset {
             if interface.id.0 as usize != index {
                 return Err(ModelError::InterfaceId);
             }
-            if self.sections.get(interface.section_id.0 as usize).is_none() {
+            let Some(section) = self.sections.get(interface.section_id.0 as usize) else {
                 return Err(ModelError::InterfaceSection);
+            };
+            if !range_contains(section.byte_range, interface.byte_range) {
+                return Err(ModelError::ByteRange);
+            }
+            if !interface.timestamp_resolution.is_valid() {
+                return Err(ModelError::TimestampResolution);
             }
             if interface.name.is_some_and(|id| self.string(id).is_none()) {
                 return Err(ModelError::StringId);
@@ -359,6 +380,8 @@ impl CaptureDataset {
     }
 
     fn validate_packets(&self) -> Result<(), ModelError> {
+        let mut layer_owned = vec![false; self.layers.len()];
+        let mut diagnostic_owned = vec![false; self.diagnostics.len()];
         for (index, packet) in self.packets.iter().enumerate() {
             if packet.id.0 as usize != index {
                 return Err(ModelError::PacketId);
@@ -375,7 +398,7 @@ impl CaptureDataset {
             }
             if packet
                 .timestamp
-                .is_some_and(|timestamp| timestamp.resolution != interface.timestamp_resolution)
+                .is_some_and(|timestamp| timestamp.resolution() != interface.timestamp_resolution)
             {
                 return Err(ModelError::TimestampResolution);
             }
@@ -391,6 +414,43 @@ impl CaptureDataset {
             {
                 return Err(ModelError::ArenaRange);
             }
+            for (owned, layer) in layer_owned
+                [packet.layers.start() as usize..packet.layers.end() as usize]
+                .iter_mut()
+                .zip(&self.layers[packet.layers.start() as usize..packet.layers.end() as usize])
+            {
+                if *owned || !range_contains(packet.data, layer.byte_range) {
+                    return Err(ModelError::ArenaOwnership);
+                }
+                *owned = true;
+            }
+            for (owned, diagnostic) in diagnostic_owned
+                [packet.diagnostics.start() as usize..packet.diagnostics.end() as usize]
+                .iter_mut()
+                .zip(
+                    &self.diagnostics
+                        [packet.diagnostics.start() as usize..packet.diagnostics.end() as usize],
+                )
+            {
+                if *owned || diagnostic.scope != crate::DiagnosticScope::Packet(packet.id) {
+                    return Err(ModelError::ArenaOwnership);
+                }
+                *owned = true;
+            }
+        }
+        if layer_owned.contains(&false) {
+            return Err(ModelError::ArenaOwnership);
+        }
+        for (diagnostic, owned) in self.diagnostics.iter().zip(diagnostic_owned) {
+            match diagnostic.scope {
+                crate::DiagnosticScope::Capture if owned => {
+                    return Err(ModelError::ArenaOwnership);
+                }
+                crate::DiagnosticScope::Packet(_) if !owned => {
+                    return Err(ModelError::ArenaOwnership);
+                }
+                crate::DiagnosticScope::Capture | crate::DiagnosticScope::Packet(_) => {}
+            }
         }
         Ok(())
     }
@@ -398,6 +458,7 @@ impl CaptureDataset {
     fn validate_fields(&self) -> Result<(), ModelError> {
         let mut child_slot_used = vec![false; self.field_children.len()];
         let mut parent_count = vec![0_u8; self.fields.len()];
+        let mut root_count = vec![0_u8; self.fields.len()];
         for (index, field) in self.fields.iter().enumerate() {
             if !field.byte_range.is_within(self.metadata.byte_length)
                 || !arena_range_fits(field.children, self.field_children.len())
@@ -415,7 +476,10 @@ impl CaptureDataset {
                 }
                 *slot_used = true;
                 let child = child_id.0 as usize;
-                if child <= index || self.fields.get(child).is_none() {
+                if child <= index
+                    || self.fields.get(child).is_none()
+                    || !range_contains(field.byte_range, self.fields[child].byte_range)
+                {
                     return Err(ModelError::FieldHierarchy);
                 }
                 parent_count[child] = parent_count[child].saturating_add(1);
@@ -437,13 +501,25 @@ impl CaptureDataset {
             return Err(ModelError::FieldHierarchy);
         }
         for layer in &self.layers {
-            if layer.root_field.is_some_and(|id| {
-                parent_count
-                    .get(id.0 as usize)
-                    .is_none_or(|count| *count != 0)
-            }) {
-                return Err(ModelError::FieldHierarchy);
+            if let Some(id) = layer.root_field {
+                let index = id.0 as usize;
+                if parent_count.get(index).is_none_or(|count| *count != 0)
+                    || !range_contains(layer.byte_range, self.fields[index].byte_range)
+                {
+                    return Err(ModelError::FieldHierarchy);
+                }
+                root_count[index] = root_count[index].saturating_add(1);
+                if root_count[index] > 1 {
+                    return Err(ModelError::FieldHierarchy);
+                }
             }
+        }
+        if parent_count
+            .iter()
+            .zip(root_count)
+            .any(|(parents, roots)| (*parents == 0) != (roots == 1))
+        {
+            return Err(ModelError::FieldHierarchy);
         }
         Ok(())
     }
@@ -485,6 +561,10 @@ fn arena_range_fits(range: IndexRange, arena_length: usize) -> bool {
     range.end() as usize <= arena_length
 }
 
+fn range_contains(container: ByteRange, child: ByteRange) -> bool {
+    child.start() >= container.start() && child.end() <= container.end()
+}
+
 /// Canonical dataset invariant violation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelError {
@@ -508,10 +588,14 @@ pub enum ModelError {
     PacketInterface,
     /// A packet timestamp disagrees with its interface resolution.
     TimestampResolution,
+    /// Capture timestamp extrema disagree with retained packet timestamps.
+    TimestampBounds,
     /// A byte range is outside the owned capture or contradicts a length.
     ByteRange,
     /// An arena span is outside its target arena.
     ArenaRange,
+    /// Packet-owned arena entries overlap, are orphaned, or have the wrong scope.
+    ArenaOwnership,
     /// A field child span is not a forward, acyclic hierarchy.
     FieldHierarchy,
     /// An interned string identifier is missing.
