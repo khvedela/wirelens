@@ -19,3 +19,7 @@ workspace = true
 [[bench]]
 name = "link_layer_decode"
 harness = false
+
+[[bench]]
+name = "network_layer_decode"
+harness = false

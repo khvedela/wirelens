@@ -3,10 +3,13 @@
 //! Decoders borrow packet bytes from `packet-core` and write only canonical
 //! arena facts with absolute evidence ranges. They do not depend on a browser,
 //! WebAssembly, or UI framework. The link-layer decoder intentionally supports
-//! only Ethernet II, one customer 802.1Q tag, and Ethernet/IPv4 ARP in v0.1.
-//! Every other encapsulation stays visible as structured, uninterpreted data.
+//! Ethernet II, one customer 802.1Q tag, and Ethernet/IPv4 ARP. It also decodes
+//! bounded IPv4 and IPv6 headers while leaving transport payloads uninterpreted.
 
 #![forbid(unsafe_code)]
+
+mod ipv4;
+mod ipv6;
 
 use packet_core::{
     ByteRange, DiagnosticCode, FieldId, FieldValue, ImportError, PacketDecodeInput,
@@ -55,12 +58,54 @@ pub const LINK_LAYER_MAX_FIELDS_PER_PACKET: u32 = 25;
 /// Maximum field-child references the current link-layer decoder can emit per packet.
 pub const LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 21;
 
-/// Stateless Ethernet, single-tag VLAN, and ARP decoder.
+/// Maximum protocol layers emitted by any current decoder path per packet.
+pub const DECODER_MAX_LAYERS_PER_PACKET: u32 = 12;
+/// Maximum decoded fields emitted by any current decoder path per packet.
+pub const DECODER_MAX_FIELDS_PER_PACKET: u32 = 91;
+/// Maximum field-child references emitted by any current decoder path per packet.
+pub const DECODER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 88;
+/// Conservative ceiling for the complete decoder vocabulary.
+pub const DECODER_VOCABULARY_COUNT_UPPER_BOUND: u32 = 192;
+/// Maximum number of IPv4 option items decoded from the IHL-bounded header.
+pub const MAX_IPV4_OPTION_ITEMS: u32 = 40;
+/// Maximum number of common IPv6 extension headers traversed per packet.
+pub const MAX_IPV6_EXTENSION_HEADERS: u32 = 8;
+/// Maximum cumulative bytes traversed across IPv6 extension headers.
+pub const MAX_IPV6_EXTENSION_BYTES: u32 = 512;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FragmentPosition {
+    Unfragmented,
+    Initial {
+        more_fragments: bool,
+    },
+    NonInitial {
+        offset_bytes: u32,
+        more_fragments: bool,
+    },
+}
+
+impl FragmentPosition {
+    const fn allows_transport_header(self) -> bool {
+        !matches!(self, Self::NonInitial { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NetworkPayload {
+    pub(crate) next_header: u8,
+    pub(crate) selector_range: ByteRange,
+    pub(crate) payload_range: ByteRange,
+    pub(crate) declared_length: u32,
+    pub(crate) fragment: FragmentPosition,
+}
+
+/// Stateless Ethernet, single-tag VLAN, ARP, IPv4, and IPv6 decoder.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LinkLayerDecoder;
 
 impl LinkLayerDecoder {
-    /// Creates a stateless link-layer decoder.
+    /// Creates a stateless packet decoder.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -146,7 +191,20 @@ fn dispatch_ether_type(
     match ether_type {
         ETHER_TYPE_ARP => decode_arp(input, sink, payload_offset),
         ETHER_TYPE_VLAN if !inside_vlan => decode_vlan(input, sink),
-        ETHER_TYPE_IPV4 | ETHER_TYPE_IPV6 => Ok(()),
+        ETHER_TYPE_IPV4 => {
+            let payload = ipv4::decode(input, sink, payload_offset)?;
+            if let Some(payload) = payload {
+                dispatch_network_payload(input, payload);
+            }
+            Ok(())
+        }
+        ETHER_TYPE_IPV6 => {
+            let payload = ipv6::decode(input, sink, payload_offset)?;
+            if let Some(payload) = payload {
+                dispatch_network_payload(input, payload);
+            }
+            Ok(())
+        }
         0..=1500 => add_unsupported_encapsulation(
             input,
             sink,
@@ -197,6 +255,19 @@ fn dispatch_ether_type(
         // Ethernet/VLAN field. An unknown, well-formed EtherType is not damage
         // and does not merit a per-packet diagnostic or another arena tree.
         _ => Ok(()),
+    }
+}
+
+fn dispatch_network_payload(input: PacketDecodeInput<'_>, payload: NetworkPayload) {
+    debug_assert!(payload.payload_range.start() >= input.data_range().start());
+    debug_assert!(payload.payload_range.end() <= input.data_range().end());
+    debug_assert!(u64::from(payload.payload_range.length()) <= u64::from(payload.declared_length));
+
+    if payload.fragment.allows_transport_header() {
+        // This is the single bounded network-to-transport handoff. Issue #14
+        // attaches TCP, UDP, ICMP, and ICMPv6 decoders here; until then the
+        // exact selector and borrowed payload evidence remain uninterpreted.
+        let _ = (payload.next_header, payload.selector_range);
     }
 }
 
@@ -640,7 +711,7 @@ fn add_bytes_child_if_complete(
     )?)
 }
 
-fn add_named_field(
+pub(crate) fn add_named_field(
     sink: &mut PacketDecodeSink<'_>,
     name: &str,
     value: FieldValue,
@@ -650,7 +721,7 @@ fn add_named_field(
     sink.add_field(name, value, range)
 }
 
-fn finish_layer(
+pub(crate) fn finish_layer(
     sink: &mut PacketDecodeSink<'_>,
     protocol: &str,
     range: ByteRange,
@@ -662,7 +733,7 @@ fn finish_layer(
     sink.add_layer(protocol, range, Some(root))
 }
 
-fn add_diagnostic(
+pub(crate) fn add_diagnostic(
     sink: &mut PacketDecodeSink<'_>,
     code: DiagnosticCode,
     severity: Severity,
@@ -673,7 +744,7 @@ fn add_diagnostic(
     sink.add_diagnostic(code, severity, Recovery::Continued, evidence, message)
 }
 
-fn packet_range(
+pub(crate) fn packet_range(
     input: PacketDecodeInput<'_>,
     offset: usize,
     length: usize,
@@ -686,25 +757,25 @@ fn packet_range(
         .ok_or(ImportError::Arithmetic)
 }
 
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let source: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
     Some(u16::from_be_bytes(source))
 }
 
-struct ChildIds {
-    values: [FieldId; 12],
+pub(crate) struct ChildIds {
+    values: [FieldId; 64],
     length: usize,
 }
 
 impl ChildIds {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
-            values: [FieldId(0); 12],
+            values: [FieldId(0); 64],
             length: 0,
         }
     }
 
-    fn push(&mut self, value: FieldId) -> Result<(), ImportError> {
+    pub(crate) fn push(&mut self, value: FieldId) -> Result<(), ImportError> {
         let Some(slot) = self.values.get_mut(self.length) else {
             return Err(ImportError::Arithmetic);
         };
@@ -713,7 +784,7 @@ impl ChildIds {
         Ok(())
     }
 
-    fn as_slice(&self) -> &[FieldId] {
+    pub(crate) fn as_slice(&self) -> &[FieldId] {
         &self.values[..self.length]
     }
 }

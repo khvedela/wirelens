@@ -555,8 +555,8 @@ fn unsupported_encapsulations_are_structured_without_diagnostics() {
 }
 
 #[test]
-fn known_future_and_unknown_ether_types_stop_cleanly_at_the_type_field() {
-    for ether_type in [0x0800_u16, 0x86dd, 0x88b5, 0xffff] {
+fn unknown_ether_types_stop_cleanly_at_the_type_field() {
+    for ether_type in [0x88b5_u16, 0xffff] {
         let dataset = decode(&ethernet(ether_type, &[0x42; 32]));
         assert_eq!(names(&dataset), ["ethernet"]);
         assert!(dataset.diagnostics().is_empty());

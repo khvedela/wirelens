@@ -152,7 +152,7 @@ jobs:
 
       - name: Replay each committed synthetic seed once
         run: |
-          for target in capture_import protocol_decode; do
+          for target in capture_import protocol_decode network_decode; do
             for seed in "fuzz/corpus/$target"/*; do
               test -f "$seed"
               cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
@@ -161,9 +161,9 @@ jobs:
 
   fuzz-scheduled-campaign:
     if: github.event_name == 'schedule'
-    name: Run scheduled capture importer and protocol decoder fuzz campaigns
+    name: Run scheduled importer and protocol decoder fuzz campaigns
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       FUZZ_NIGHTLY: nightly-2026-07-20
       CARGO_FUZZ_VERSION: 0.13.2
@@ -181,15 +181,15 @@ jobs:
 
       - name: Run bounded scheduled campaign
         run: |
-          cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- \
-            -max_total_time=300 \
-            -max_len=4096 \
-            -timeout=2 \
-            -rss_limit_mb=1024 \
-            -print_final_stats=1
-          cargo +"$FUZZ_NIGHTLY" fuzz run protocol_decode fuzz/corpus/protocol_decode -- \
-            -max_total_time=300 \
-            -max_len=4096 \
-            -timeout=2 \
-            -rss_limit_mb=1024 \
-            -print_final_stats=1
+          for target in capture_import protocol_decode network_decode; do
+            max_len=4096
+            if [ "$target" = network_decode ]; then
+              max_len=4097
+            fi
+            cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "fuzz/corpus/$target" -- \
+              -max_total_time=300 \
+              -max_len="$max_len" \
+              -timeout=2 \
+              -rss_limit_mb=1024 \
+              -print_final_stats=1
+          done
