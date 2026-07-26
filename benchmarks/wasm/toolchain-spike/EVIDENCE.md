@@ -6,7 +6,7 @@
 - Branch: `feature/rust-wasm-toolchain`
 - Local OS: macOS 26.6, Apple Silicon
 - Reference hardware: Apple M3 Pro MacBook Pro, 11 cores, 18 GB memory
-- Clean environment: pending the scoped `Toolchain spike` Ubuntu 24.04 GitHub Actions run; its passing URL will replace this note before merge
+- Clean environment: scoped [`Toolchain spike` Ubuntu 24.04 run 30207645376](https://github.com/khvedela/wirelens/actions/runs/30207645376) passed the locked workspace/MSRV gates, both artifact flows, and all four Chromium/Firefox worker cases
 - Probe data: the in-memory synthetic vector `[1, 2, 3, 4, 255]`; no capture file is read or committed
 
 ## Commands and results
