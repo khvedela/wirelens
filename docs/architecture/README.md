@@ -1,6 +1,6 @@
 # WireLens architecture
 
-> **Decision status:** open. This document describes a provisional direction and the questions that must be resolved before application implementation.
+> **Decision status:** partially resolved. Core v0.1 boundaries and EPIC 2 ingestion decisions are accepted; remaining items below stay open.
 
 WireLens is expected to combine a React/TypeScript browser interface, a Web Worker, and platform-neutral Rust analysis crates compiled to WebAssembly. A later optional native Rust agent may provide authenticated live observations. These boundaries are hypotheses, not final decisions.
 
@@ -16,15 +16,10 @@ WireLens is expected to combine a React/TypeScript browser interface, a Web Work
 ## Open decisions
 
 1. **Frontend setup:** React with Vite versus another frontend/build configuration; assess worker and Wasm integration, testing, static deployment, and long-term maintenance.
-2. **PCAP parsing crates:** correctness, PCAPNG coverage, malformed-input behavior, Wasm compatibility, maintenance, licensing, and zero/low-copy options.
-3. **Parsed-data ownership:** packet-buffer ownership, borrowed views, arena/index strategies, cache lifetimes, and the safe zero-copy boundary.
-4. **Wasm serialization:** handles, typed arrays, generated bindings, binary schemas, batching, and avoidance of whole-capture JSON serialization.
-5. **Worker protocol:** command and event schemas, request identity, progress, cancellation, structured errors, backpressure, and versioning.
-6. **Large files:** streaming or chunking limits, memory budgets, incremental indexes, cancellation cleanup, and realistic browser constraints.
-7. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
-8. **Visualization libraries:** packet-table virtualization, charts, sequence diagrams, topology rendering, accessibility, bundle size, and performance.
-9. **Native-agent protocol:** local authentication, transport, schema evolution, batching, backpressure, replay resistance, and raw-packet exposure.
-10. **Browser security model:** CSP, worker isolation, dependency risk, malicious captures, denial of service, export safety, and accidental network transmission.
+2. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
+3. **Visualization libraries:** packet-table virtualization, charts, sequence diagrams, topology rendering, accessibility, bundle size, and performance.
+4. **Native-agent protocol:** local authentication, transport, schema evolution, batching, backpressure, replay resistance, and raw-packet exposure.
+5. **Browser security model:** CSP, worker isolation, dependency risk, malicious captures, denial of service, export safety, and accidental network transmission.
 
 ## Required first decision record
 
@@ -35,3 +30,4 @@ The initial architecture issue must produce an ADR that defines browser/native r
 - [ADR-0001: v0.1 offline architecture boundaries and engineering constraints](./adr-0001-v0.1-boundaries.md)
 - [ADR-0002: repository and workspace structure map](./adr-0002-repository-workspace-structure.md)
 - [ADR-0003: verification, fixture, fuzzing, and benchmark strategy](./adr-0003-verification-fixture-fuzz-benchmark-strategy.md)
+- [ADR-0004: EPIC 2 capture ingestion and Rust/Wasm pipeline](./adr-0004-epic-2-capture-ingestion-rust-wasm-pipeline.md)
