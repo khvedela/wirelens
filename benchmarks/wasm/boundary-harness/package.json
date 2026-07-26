@@ -1,0 +1,30 @@
+{
+  "name": "@wirelens/wasm-boundary-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.18.0",
+    "pnpm": "11.17.0"
+  },
+  "packageManager": "pnpm@11.17.0",
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:web": "vite build",
+    "evidence": "node scripts/evidence.mjs",
+    "preview": "vite preview --host 127.0.0.1 --port 4174 --strictPort",
+    "test": "corepack pnpm run verify",
+    "test:browser": "playwright test",
+    "tools:install": "node ../toolchain-spike/scripts/install-tools.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "corepack pnpm run verify:toolchain && corepack pnpm run build:wasm && corepack pnpm run verify:contract && corepack pnpm run typecheck && corepack pnpm run build:web && corepack pnpm run test:browser",
+    "verify:contract": "node scripts/verify-contract.mjs",
+    "verify:toolchain": "node scripts/verify-toolchain.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3",
+    "vite": "8.1.5"
+  }
+}

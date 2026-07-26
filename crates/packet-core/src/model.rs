@@ -1,6 +1,6 @@
 //! Canonical capture, interface, and packet model.
 
-use core::fmt;
+use core::{fmt, mem::size_of};
 
 use crate::{
     ByteRange, CaptureTimestamp, DecodedField, Diagnostic, FieldId, IndexRange, LayerFact,
@@ -269,6 +269,45 @@ impl CaptureDataset {
     #[must_use]
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns the number of immutable interned strings.
+    #[must_use]
+    pub fn interned_string_count(&self) -> usize {
+        self.strings.len()
+    }
+
+    /// Returns the exact UTF-8 bytes retained by the interned strings.
+    #[must_use]
+    pub fn interned_string_bytes(&self) -> Option<u64> {
+        self.strings.iter().try_fold(0_u64, |total, value| {
+            total.checked_add(u64::try_from(value.len()).ok()?)
+        })
+    }
+
+    /// Returns the retained canonical index allocation in bytes.
+    ///
+    /// The checked sum covers each exact-length fixed arena, the outer boxed
+    /// string arena, and all interned UTF-8 bytes. It intentionally excludes
+    /// the capture byte allocation returned by [`bytes`](Self::bytes), so
+    /// callers can report source and index retention independently. `None`
+    /// indicates that the sum cannot be represented as `u64`.
+    #[must_use]
+    pub fn retained_index_bytes(&self) -> Option<u64> {
+        let mut total = 0_u64;
+        for bytes in [
+            arena_bytes(&self.sections)?,
+            arena_bytes(&self.interfaces)?,
+            arena_bytes(&self.packets)?,
+            arena_bytes(&self.layers)?,
+            arena_bytes(&self.fields)?,
+            arena_bytes(&self.field_children)?,
+            arena_bytes(&self.diagnostics)?,
+            arena_bytes(&self.strings)?,
+        ] {
+            total = total.checked_add(bytes)?;
+        }
+        total.checked_add(self.interned_string_bytes()?)
     }
 
     /// Returns a packet by stable identity.
@@ -555,6 +594,12 @@ impl CaptureDataset {
 
         Ok(())
     }
+}
+
+fn arena_bytes<T>(arena: &[T]) -> Option<u64> {
+    u64::try_from(arena.len())
+        .ok()?
+        .checked_mul(u64::try_from(size_of::<T>()).ok()?)
 }
 
 fn arena_range_fits(range: IndexRange, arena_length: usize) -> bool {
