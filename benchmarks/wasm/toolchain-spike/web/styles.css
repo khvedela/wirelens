@@ -1,0 +1,53 @@
+:root {
+  color: #dff8f1;
+  background: #071410;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+}
+
+main {
+  width: min(42rem, calc(100% - 3rem));
+  padding: 2rem;
+  border: 1px solid #2f6658;
+  border-radius: 1rem;
+  background: #0c211b;
+}
+
+.eyebrow,
+dt {
+  color: #7fd8be;
+}
+
+h1 {
+  margin: 0.25rem 0 2rem;
+}
+
+dl {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+dl div {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) 2fr;
+  gap: 1rem;
+}
+
+dd {
+  margin: 0;
+}
+
+[data-state="ready"] #status {
+  color: #72f1b8;
+}
+
+[data-state="error"] #status {
+  color: #ff8e8e;
+}

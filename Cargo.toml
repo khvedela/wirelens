@@ -1,6 +1,9 @@
 [workspace]
 members = ["crates/packet-core"]
-exclude = ["benchmarks/parser/library-spike"]
+exclude = [
+    "benchmarks/parser/library-spike",
+    "benchmarks/wasm/toolchain-spike",
+]
 resolver = "3"
 
 [workspace.package]

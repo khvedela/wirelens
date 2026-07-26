@@ -1,0 +1,7 @@
+.tools/
+dist/
+node_modules/
+playwright-report/
+target/
+test-results/
+web/generated/

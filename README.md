@@ -4,7 +4,7 @@
 
 **Inspect PCAP files locally, reconstruct network flows, and understand protocol behavior through a modern interactive interface.**
 
-> **Status:** planning and architecture. WireLens is not yet an implemented packet analyzer.
+> **Status:** foundational implementation is underway. WireLens is not yet a usable packet analyzer.
 
 ## The problem
 
@@ -16,7 +16,7 @@ WireLens will be a privacy-first network investigation application for networkin
 
 ## Why Rust and WebAssembly
 
-Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. Compiling a platform-neutral Rust analysis core to WebAssembly can reuse those correctness-focused components in the browser while keeping expensive work in a Web Worker. The architecture must still validate crate selection, data ownership, browser integration, and performance before implementation begins.
+Rust is a strong fit for parsing untrusted binary input because it supports explicit ownership, predictable resource use, and memory-safe abstractions without a garbage collector. WireLens is designed to compile a platform-neutral Rust analysis core to WebAssembly and run expensive browser work in a Web Worker. Accepted architecture decisions define crate ownership, browser boundaries, the capture-framing library, canonical model, and reproducible worker/Wasm build contract; implementation performance remains evidence-driven.
 
 ## Privacy first
 
@@ -35,9 +35,9 @@ Packet data can contain credentials, identifiers, private conversations, and pro
 - A later native Rust live-capture agent
 - Optional future Aya/eBPF-based Linux observability, where justified
 
-## Provisional architecture
+## Accepted v0.1 architecture
 
-Technical boundaries remain open until the first architecture decision record is accepted.
+The offline dependency direction and runtime responsibilities are governed by the [accepted architecture decisions](docs/architecture/README.md).
 
 ```mermaid
 flowchart TB
@@ -47,7 +47,7 @@ flowchart TB
     Browser --> DB["Opt-in IndexedDB session persistence"]
     Agent["Optional future native Rust capture agent"] -. "authenticated local stream" .-> Browser
 
-    subgraph RustWorkspace["Provisional Rust workspace"]
+    subgraph RustWorkspace["Rust workspace"]
         PacketCore["packet-core"]
         Decoders["protocol-decoders"]
         Flow["flow-engine"]
@@ -58,17 +58,17 @@ flowchart TB
     end
 
     Wasm --> Adapter
-    Adapter --> PacketCore
-    PacketCore --> Decoders
-    Decoders --> Flow
-    Flow --> Analysis
+    Adapter --> Analysis
+    Analysis --> Flow
+    Flow --> Decoders
+    Decoders --> PacketCore
 ```
 
 ## Repository structure map
 
 ```text
 wirelens/
-├── crates/                  # Future Rust workspace crates (see ADR-0002 responsibilities)
+├── crates/                  # Rust workspace crates, added incrementally per ADR-0002
 ├── apps/
 │   └── web/                 # Future browser application
 ├── fixtures/                # Synthetic or explicitly redistributable captures
@@ -77,7 +77,7 @@ wirelens/
 └── .github/                 # Contribution and issue templates
 ```
 
-This structure is the accepted repository/workspace map for upcoming initialization work. See [ADR-0002](docs/architecture/adr-0002-repository-workspace-structure.md) for crate responsibilities, dependency direction, naming conventions, and boundary guardrails.
+This structure governs ongoing repository and workspace initialization. See [ADR-0002](docs/architecture/adr-0002-repository-workspace-structure.md) for crate responsibilities, dependency direction, naming conventions, and boundary guardrails.
 
 ## Roadmap
 
@@ -89,7 +89,7 @@ Delivery is tracked in the public [WireLens Roadmap](https://github.com/users/kh
 - **v0.3 — Investigation Experience:** complete the investigation workflow in [Investigation user experience](https://github.com/khvedela/wirelens/issues/23), then make it releasable in [MVP hardening and release](https://github.com/khvedela/wirelens/issues/30).
 - **v0.4 — Live Capture / v1.0 — eBPF Observability:** pursue the explicitly deferred [Live capture and eBPF observability](https://github.com/khvedela/wirelens/issues/36) epic only after the offline product is stable.
 
-Dates are intentionally unset until the architecture spike is complete. See [the detailed roadmap](docs/roadmap.md) for issue-level sequencing.
+Dates remain evidence-driven rather than speculative. See [the detailed roadmap](docs/roadmap.md) for issue-level sequencing.
 
 ## Non-goals for the first release
 
@@ -103,7 +103,7 @@ Dates are intentionally unset until the architecture spike is complete. See [the
 
 ## Contributing
 
-WireLens is currently accepting planning, architecture, research, documentation, and test-strategy contributions. Read [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the open architecture questions before proposing implementation. Scope changes should be discussed in an issue first.
+WireLens accepts issue-scoped implementation, research, documentation, and verification contributions. Read [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the accepted decisions plus open architecture questions before proposing changes. Scope changes should be discussed in an issue first.
 
 ## Security and responsible capture handling
 

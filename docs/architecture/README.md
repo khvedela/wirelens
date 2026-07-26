@@ -15,7 +15,7 @@ WireLens combines a React/TypeScript browser interface, a Web Worker, and platfo
 
 ## Open decisions
 
-1. **Frontend setup:** validate the production React/bundler configuration, worker/Wasm integration, testing, static deployment, and long-term maintenance.
+1. **Frontend product setup:** select application-level accessibility, component, state, and test libraries; define PWA caching, static deployment, and long-term maintenance beyond ADR-0006's proven build contract.
 2. **Wasm and worker protocol:** finalize commands/events, typed batches, handles, request identity, progress, cancellation, structured errors, backpressure, and versioning in #9.
 3. **Large files:** streaming or chunking limits, memory budgets, incremental indexes, cancellation cleanup, and realistic browser constraints.
 4. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
@@ -34,3 +34,4 @@ Accepted ADRs are normative for browser/native responsibilities, crate and packa
 - [ADR-0003: verification, fixture, fuzzing, and benchmark strategy](./adr-0003-verification-fixture-fuzz-benchmark-strategy.md)
 - [ADR-0004: capture-container framing library](./adr-0004-capture-framing-library.md)
 - [ADR-0005: canonical capture and packet data model](./adr-0005-canonical-capture-packet-model.md)
+- [ADR-0006: Rust, WebAssembly, and frontend toolchain](./adr-0006-rust-wasm-frontend-toolchain.md)
