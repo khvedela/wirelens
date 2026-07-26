@@ -81,14 +81,15 @@ This structure is a proposal, not a commitment. No application source code exist
 
 ## Roadmap
 
-- **M0 — Foundation:** validate architecture, tooling, repository boundaries, and testing strategy.
-- **v0.1 — Offline Packet Viewer:** import captures locally and inspect decoded packets without blocking the browser.
-- **v0.2 — Flow Analysis:** reconstruct conversations and explain TCP behavior and failures.
-- **v0.3 — Investigation Experience:** complete filtering, visualization, persistence, accessibility, and release hardening.
-- **v0.4 — Live Capture:** add an optional authenticated native Rust capture agent after the offline product is stable.
-- **v1.0 — eBPF Observability:** evaluate and implement deeper Linux telemetry only where evidence supports it.
+Delivery is tracked in the public [WireLens Roadmap](https://github.com/users/khvedela/projects/4).
 
-Dates are intentionally unset until the architecture spike is complete. See [the detailed roadmap](docs/roadmap.md); links to the GitHub Project and epics will be added after planning issues are created.
+- **M0 — Foundation:** validate architecture, tooling, repository boundaries, and testing strategy in [Foundation and architecture](https://github.com/khvedela/wirelens/issues/1).
+- **v0.1 — Offline Packet Viewer:** build local ingestion in [Capture ingestion and Rust/Wasm pipeline](https://github.com/khvedela/wirelens/issues/6) and essential decoding in [Protocol decoding](https://github.com/khvedela/wirelens/issues/11).
+- **v0.2 — Flow Analysis:** reconstruct conversations and explain TCP behavior in [Flow reconstruction and network analysis](https://github.com/khvedela/wirelens/issues/17).
+- **v0.3 — Investigation Experience:** complete the investigation workflow in [Investigation user experience](https://github.com/khvedela/wirelens/issues/23), then make it releasable in [MVP hardening and release](https://github.com/khvedela/wirelens/issues/30).
+- **v0.4 — Live Capture / v1.0 — eBPF Observability:** pursue the explicitly deferred [Live capture and eBPF observability](https://github.com/khvedela/wirelens/issues/36) epic only after the offline product is stable.
+
+Dates are intentionally unset until the architecture spike is complete. See [the detailed roadmap](docs/roadmap.md) for issue-level sequencing.
 
 ## Non-goals for the first release
 
