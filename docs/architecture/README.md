@@ -30,3 +30,7 @@ WireLens is expected to combine a React/TypeScript browser interface, a Web Work
 ## Required first decision record
 
 The initial architecture issue must produce an ADR that defines browser/native responsibilities, crate and package boundaries, data ownership across Rust/Wasm/worker/React, the platform-neutral core, privacy and security constraints, and measurable v0.1 success criteria. Implementation issues should remain blocked where they depend on those decisions.
+
+## Accepted architecture decisions
+
+- [ADR-0001: v0.1 offline architecture boundaries and engineering constraints](./adr-0001-v0.1-boundaries.md)
