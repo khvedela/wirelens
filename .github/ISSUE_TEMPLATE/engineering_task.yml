@@ -1,0 +1,48 @@
+name: Engineering task
+description: Propose scoped engineering, research, testing, or infrastructure work
+title: "[Engineering]: "
+labels: ["engineering", "planning:backlog"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: State the outcome and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and technical direction
+      description: Identify affected boundaries, constraints, and expected artifacts.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: "- [ ] Observable, testable result"
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Testing and validation
+      description: Include correctness, malformed-input, performance, browser, or documentation checks as relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and risks
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Project constraints
+      options:
+        - label: This task preserves local processing and does not upload offline packet data.
+          required: true
+        - label: This task does not silently broaden the current milestone.
+          required: true

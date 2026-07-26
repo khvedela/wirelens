@@ -1,0 +1,64 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe WireLens behavior
+title: "[Bug]: "
+labels: ["planning:backlog"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. **Do not upload sensitive packet captures publicly.** Use a synthetic reproducer or describe the capture safely. Report security vulnerabilities privately according to SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: Release, commit SHA, or branch
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and operating system
+      placeholder: Firefox 128 on Fedora 42
+    validations:
+      required: true
+  - type: dropdown
+    id: capture-type
+    attributes:
+      label: Capture type
+      options: [PCAP, PCAPNG, Live capture, Not capture-related, Unknown]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic or redistributable data and include the smallest safe reproducer.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: sensitive
+    attributes:
+      label: Does the capture contain sensitive data?
+      description: Never attach sensitive captures to a public issue.
+      options: [No capture is attached, No — synthetic or explicitly redistributable, Yes or possibly — I will not upload it]
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I have not included credentials, private traffic, personal data, or proprietary capture content.
+          required: true

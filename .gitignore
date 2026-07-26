@@ -1,0 +1,56 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# WebAssembly tooling
+.wasm-pack/
+pkg/
+
+# Node, React, and TypeScript
+node_modules/
+.npm/
+.pnpm-store/
+dist/
+build/
+coverage/
+.vite/
+.turbo/
+.eslintcache
+*.tsbuildinfo
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+.cache/
+tmp/
+
+# macOS and Linux desktop metadata
+.DS_Store
+.AppleDouble
+._*
+Thumbs.db
+
+# JetBrains IDEs
+.idea/
+*.iml
+
+# VS Code (retain shared project settings if added later)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Local capture files: never commit sensitive packet data
+*.pcap
+*.pcapng
+!fixtures/**/*.pcap
+!fixtures/**/*.pcapng

@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a user-centered WireLens capability
+title: "[Feature]: "
+labels: ["feature", "planning:backlog"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Who is blocked, and what investigation job is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the outcome without prescribing unnecessary implementation detail.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: networking-use-case
+    attributes:
+      label: Networking use case
+      description: Include relevant protocols, capture conditions, scale, and expected evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy implications
+      description: Explain data movement, persistence, export, or native privileges.
+    validations:
+      required: true
+  - type: dropdown
+    id: mvp
+    attributes:
+      label: MVP relevance
+      options: [Required for offline MVP, Useful after offline MVP, Live capture direction, eBPF or future research, Unsure]
+    validations:
+      required: true
