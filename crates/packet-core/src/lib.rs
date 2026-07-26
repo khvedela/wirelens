@@ -1,0 +1,22 @@
+//! Platform-neutral capture and packet primitives for `WireLens`.
+//!
+//! The model is index-first: capture bytes stay in one owning dataset while
+//! packets, decoded fields, diagnostics, and derived layers refer to stable IDs
+//! and checked byte ranges. This crate has no browser, WebAssembly, or UI types.
+
+#![forbid(unsafe_code)]
+
+mod diagnostic;
+mod field;
+mod model;
+mod range;
+mod timestamp;
+
+pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Severity};
+pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
+pub use model::{
+    ByteOrder, CaptureDataset, CaptureDatasetParts, CaptureFormat, CaptureMetadata, InterfaceId,
+    InterfaceMetadata, LinkType, ModelError, PacketId, PacketRecord, SectionId, SectionMetadata,
+};
+pub use range::{ByteRange, IndexRange};
+pub use timestamp::{CaptureTimestamp, TimestampError, TimestampResolution};

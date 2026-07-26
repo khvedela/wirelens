@@ -1,8 +1,8 @@
 # WireLens architecture
 
-> **Decision status:** open. This document describes a provisional direction and the questions that must be resolved before application implementation.
+> **Decision status:** active. Accepted decisions below govern implementation; unresolved topics remain explicitly listed.
 
-WireLens is expected to combine a React/TypeScript browser interface, a Web Worker, and platform-neutral Rust analysis crates compiled to WebAssembly. A later optional native Rust agent may provide authenticated live observations. These boundaries are hypotheses, not final decisions.
+WireLens combines a React/TypeScript browser interface, a Web Worker, and platform-neutral Rust analysis crates compiled to WebAssembly. A later optional native Rust agent may provide authenticated live observations. ADR-0001 defines the normative offline boundaries.
 
 ## Principles to validate
 
@@ -15,20 +15,17 @@ WireLens is expected to combine a React/TypeScript browser interface, a Web Work
 
 ## Open decisions
 
-1. **Frontend setup:** React with Vite versus another frontend/build configuration; assess worker and Wasm integration, testing, static deployment, and long-term maintenance.
-2. **PCAP parsing crates:** correctness, PCAPNG coverage, malformed-input behavior, Wasm compatibility, maintenance, licensing, and zero/low-copy options.
-3. **Parsed-data ownership:** packet-buffer ownership, borrowed views, arena/index strategies, cache lifetimes, and the safe zero-copy boundary.
-4. **Wasm serialization:** handles, typed arrays, generated bindings, binary schemas, batching, and avoidance of whole-capture JSON serialization.
-5. **Worker protocol:** command and event schemas, request identity, progress, cancellation, structured errors, backpressure, and versioning.
-6. **Large files:** streaming or chunking limits, memory budgets, incremental indexes, cancellation cleanup, and realistic browser constraints.
-7. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
-8. **Visualization libraries:** packet-table virtualization, charts, sequence diagrams, topology rendering, accessibility, bundle size, and performance.
-9. **Native-agent protocol:** local authentication, transport, schema evolution, batching, backpressure, replay resistance, and raw-packet exposure.
-10. **Browser security model:** CSP, worker isolation, dependency risk, malicious captures, denial of service, export safety, and accidental network transmission.
+1. **Frontend setup:** validate the production React/bundler configuration, worker/Wasm integration, testing, static deployment, and long-term maintenance.
+2. **Wasm and worker protocol:** finalize commands/events, typed batches, handles, request identity, progress, cancellation, structured errors, backpressure, and versioning in #9.
+3. **Large files:** streaming or chunking limits, memory budgets, incremental indexes, cancellation cleanup, and realistic browser constraints.
+4. **IndexedDB persistence:** opt-in semantics, schema versions, quotas, migrations, deletion, and whether raw packet data is ever persisted.
+5. **Visualization libraries:** packet-table virtualization, charts, sequence diagrams, topology rendering, accessibility, bundle size, and performance.
+6. **Native-agent protocol:** local authentication, transport, schema evolution, batching, backpressure, replay resistance, and raw-packet exposure.
+7. **Browser security model:** CSP, worker isolation, dependency risk, malicious captures, denial of service, export safety, and accidental network transmission.
 
-## Required first decision record
+## Decision discipline
 
-The initial architecture issue must produce an ADR that defines browser/native responsibilities, crate and package boundaries, data ownership across Rust/Wasm/worker/React, the platform-neutral core, privacy and security constraints, and measurable v0.1 success criteria. Implementation issues should remain blocked where they depend on those decisions.
+Accepted ADRs are normative for browser/native responsibilities, crate and package boundaries, ownership, privacy, security, and measurable success criteria. New implementation must remain blocked when it depends on an unresolved decision, and material boundary changes require a superseding ADR.
 
 ## Accepted architecture decisions
 
@@ -36,3 +33,4 @@ The initial architecture issue must produce an ADR that defines browser/native r
 - [ADR-0002: repository and workspace structure map](./adr-0002-repository-workspace-structure.md)
 - [ADR-0003: verification, fixture, fuzzing, and benchmark strategy](./adr-0003-verification-fixture-fuzz-benchmark-strategy.md)
 - [ADR-0004: capture-container framing library](./adr-0004-capture-framing-library.md)
+- [ADR-0005: canonical capture and packet data model](./adr-0005-canonical-capture-packet-model.md)
