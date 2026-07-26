@@ -8,8 +8,8 @@ use packet_core::{
     LayerFact, SectionMetadata, StringId, decoder_scratch_bytes_upper_bound,
 };
 use protocol_decoders::{
-    LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET, LINK_LAYER_MAX_FIELDS_PER_PACKET,
-    LINK_LAYER_MAX_LAYERS_PER_PACKET, LINK_LAYER_VOCABULARY_COUNT_UPPER_BOUND, LinkLayerDecoder,
+    DECODER_MAX_FIELD_CHILDREN_PER_PACKET, DECODER_MAX_FIELDS_PER_PACKET,
+    DECODER_MAX_LAYERS_PER_PACKET, DECODER_VOCABULARY_COUNT_UPPER_BOUND, LinkLayerDecoder,
 };
 
 use crate::{
@@ -84,13 +84,13 @@ pub const CAPTURE_BYTES_PER_DECODED_FIELD: u32 = 63;
 pub const CAPTURE_BYTES_PER_FIELD_CHILD: u32 = 84;
 /// Baseline decoded-layer allowance for the fixed small-capture packet allowance.
 pub const CAPTURE_DECODED_LAYER_BASE_ALLOWANCE: u32 =
-    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_LAYERS_PER_PACKET;
+    CAPTURE_PACKET_BASE_ALLOWANCE * DECODER_MAX_LAYERS_PER_PACKET;
 /// Baseline decoded-field allowance for the fixed small-capture packet allowance.
 pub const CAPTURE_DECODED_FIELD_BASE_ALLOWANCE: u32 =
-    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_FIELDS_PER_PACKET;
+    CAPTURE_PACKET_BASE_ALLOWANCE * DECODER_MAX_FIELDS_PER_PACKET;
 /// Baseline field-child allowance for the fixed small-capture packet allowance.
 pub const CAPTURE_FIELD_CHILD_BASE_ALLOWANCE: u32 =
-    CAPTURE_PACKET_BASE_ALLOWANCE * LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET;
+    CAPTURE_PACKET_BASE_ALLOWANCE * DECODER_MAX_FIELD_CHILDREN_PER_PACKET;
 
 /// Pre-copy admission result for one complete capture input.
 ///
@@ -1645,7 +1645,7 @@ fn import_auxiliary_bytes_upper_bound(limits: ImportLimits) -> Result<u64, Bound
     // string finalization allocations remain accounted separately below.
     let string_count = u64::from(limits.max_interfaces)
         .checked_add(u64::from(limits.max_diagnostics))
-        .and_then(|count| count.checked_add(u64::from(LINK_LAYER_VOCABULARY_COUNT_UPPER_BOUND)))
+        .and_then(|count| count.checked_add(u64::from(DECODER_VOCABULARY_COUNT_UPPER_BOUND)))
         .ok_or_else(arithmetic_error)?;
     let tree_pointer_reservation = type_bytes::<usize>()?
         .checked_mul(4)
@@ -1910,26 +1910,88 @@ mod tests {
         BoundaryErrorCode, HandleKind, ImportLimits, MAX_CAPTURE_BYTES, MAX_IMPORT_STEP_BYTES,
         MAX_IMPORT_STEP_RECORDS, MAX_TOTAL_LOGICAL_BYTES, handle::MAX_GENERATION,
     };
+    use protocol_decoders::{
+        DECODER_MAX_FIELD_CHILDREN_PER_PACKET, DECODER_MAX_FIELDS_PER_PACKET,
+        DECODER_MAX_LAYERS_PER_PACKET,
+    };
 
-    fn maximal_vlan_arp_decode() -> Vec<u8> {
-        let mut frame = Vec::with_capacity(46);
+    fn vlan_header(inner_ether_type: u16) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(18);
         frame.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
         frame.extend([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
         frame.extend(0x8100_u16.to_be_bytes());
         frame.extend(100_u16.to_be_bytes());
-        frame.extend(0x0806_u16.to_be_bytes());
-        // A non-Ethernet hardware type with otherwise complete address bytes
-        // emits the bounded ARP facts plus a structured unsupported layer.
-        frame.extend(2_u16.to_be_bytes());
-        frame.extend(0x0800_u16.to_be_bytes());
-        frame.extend([6, 4]);
-        frame.extend(1_u16.to_be_bytes());
-        frame.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        frame.extend([192, 0, 2, 1]);
-        frame.extend([0x00; 6]);
-        frame.extend([192, 0, 2, 2]);
-        assert_eq!(frame.len(), 46);
+        frame.extend(inner_ether_type.to_be_bytes());
+        assert_eq!(frame.len(), 18);
         frame
+    }
+
+    fn ipv4_checksum(header: &[u8]) -> u16 {
+        assert_eq!(header.len() % 2, 0);
+        let mut sum = 0_u32;
+        for pair in header.chunks_exact(2) {
+            sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+        }
+        while sum > u32::from(u16::MAX) {
+            sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+        }
+        !u16::try_from(sum).expect("folded checksum fits u16")
+    }
+
+    fn maximal_ipv4_field_decode() -> Vec<u8> {
+        const IPV4_HEADER_LENGTH: usize = 60;
+
+        let mut frame = vlan_header(0x0800);
+        let ipv4_start = frame.len();
+        frame.extend([0x4f, 0x00]);
+        frame.extend(60_u16.to_be_bytes());
+        frame.extend(0x1234_u16.to_be_bytes());
+        frame.extend(0_u16.to_be_bytes());
+        frame.extend([64, 253]);
+        frame.extend(0_u16.to_be_bytes());
+        frame.extend([192, 0, 2, 1]);
+        frame.extend([198, 51, 100, 2]);
+        for _ in 0..20 {
+            // A generic two-byte option maximizes structured option fields
+            // within IPv4's 40-byte IHL-bounded option area.
+            frame.extend([0x1e, 2]);
+        }
+        assert_eq!(frame.len(), ipv4_start + IPV4_HEADER_LENGTH);
+        let checksum = ipv4_checksum(&frame[ipv4_start..]);
+        frame[ipv4_start + 10..ipv4_start + 12].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(ipv4_checksum(&frame[ipv4_start..]), 0);
+        frame
+    }
+
+    fn maximal_ipv6_layer_decode() -> Vec<u8> {
+        let mut frame = vlan_header(0x86dd);
+        frame.extend(0x6000_0000_u32.to_be_bytes());
+        frame.extend(72_u16.to_be_bytes());
+        frame.extend([60, 64]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        for extension_index in 0..9 {
+            let next_header = if extension_index < 8 { 60 } else { 253 };
+            frame.extend([next_header, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        assert_eq!(frame.len(), 18 + 40 + 72);
+        frame
+    }
+
+    struct MaximumLayerTestDecoder;
+
+    impl packet_core::PacketDecoder for MaximumLayerTestDecoder {
+        fn decode(
+            &mut self,
+            input: packet_core::PacketDecodeInput<'_>,
+            sink: &mut packet_core::PacketDecodeSink<'_>,
+        ) -> Result<(), packet_core::ImportError> {
+            let protocol = sink.intern("test_maximum_layer")?;
+            for _ in 0..DECODER_MAX_LAYERS_PER_PACKET {
+                sink.add_layer(protocol, input.data_range(), None)?;
+            }
+            Ok(())
+        }
     }
 
     fn repeated_legacy_pcap(frame: &[u8], packet_count: u32) -> Box<[u8]> {
@@ -2145,13 +2207,10 @@ mod tests {
     }
 
     #[test]
-    fn base_allowance_imports_1024_maximal_vlan_arp_decodes_without_saturation() {
+    fn base_allowance_imports_1024_ipv4_field_max_packets_without_saturation() {
         const PACKETS: u32 = 1_024;
-        const LAYERS_PER_PACKET: u32 = 4;
-        const FIELDS_PER_PACKET: u32 = 25;
-        const CHILDREN_PER_PACKET: u32 = 21;
 
-        let capture = repeated_legacy_pcap(&maximal_vlan_arp_decode(), PACKETS);
+        let capture = repeated_legacy_pcap(&maximal_ipv4_field_decode(), PACKETS);
         let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
         let mut state = BoundaryState::new();
         let admission = state
@@ -2172,7 +2231,7 @@ mod tests {
 
         let import = state
             .begin_import(capture)
-            .expect("the synthetic VLAN/ARP capture begins importing");
+            .expect("the synthetic VLAN/IPv4 capture begins importing");
         loop {
             match state
                 .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
@@ -2197,12 +2256,12 @@ mod tests {
             .get(published.dataset)
             .expect("published dataset remains registered");
         let packet_count = usize::try_from(PACKETS).expect("packet count fits usize");
-        let layers_per_packet = usize::try_from(LAYERS_PER_PACKET).expect("layer count fits usize");
-        let fields_per_packet = usize::try_from(FIELDS_PER_PACKET).expect("field count fits usize");
+        let fields_per_packet =
+            usize::try_from(DECODER_MAX_FIELDS_PER_PACKET).expect("field count fits usize");
         let children_per_packet =
-            usize::try_from(CHILDREN_PER_PACKET).expect("child count fits usize");
+            usize::try_from(DECODER_MAX_FIELD_CHILDREN_PER_PACKET).expect("child count fits usize");
         assert_eq!(dataset.packets().len(), packet_count);
-        assert_eq!(dataset.layers().len(), packet_count * layers_per_packet);
+        assert_eq!(dataset.layers().len(), packet_count * 3);
         assert_eq!(dataset.fields().len(), packet_count * fields_per_packet);
         assert_eq!(
             dataset.field_children().len(),
@@ -2213,14 +2272,81 @@ mod tests {
             dataset
                 .packets()
                 .iter()
-                .all(|packet| packet.layers.length() == LAYERS_PER_PACKET)
+                .all(|packet| packet.layers.length() == 3)
         );
     }
 
     #[test]
-    fn packet_beyond_the_maximal_decode_baseline_fails_closed_and_reclaims_import() {
+    fn base_allowance_imports_1024_ipv6_layer_max_packets_without_saturation() {
+        const PACKETS: u32 = 1_024;
+
+        let capture = repeated_legacy_pcap(&maximal_ipv6_layer_decode(), PACKETS);
+        let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
+        let mut state = BoundaryState::new();
+        let admission = state
+            .admit_import_input(capture_length)
+            .expect("small-capture decode baseline is admitted");
+        assert_eq!(
+            admission.limits().max_layers,
+            CAPTURE_DECODED_LAYER_BASE_ALLOWANCE
+        );
+
+        let import = state
+            .begin_import(capture)
+            .expect("the synthetic VLAN/IPv6 capture begins importing");
+        loop {
+            match state
+                .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
+                .expect("the decode baseline prevents layer-arena saturation")
+            {
+                ImportAdvance::Progress(_) => {}
+                ImportAdvance::Ready(progress) => {
+                    assert_eq!(progress.packets_retained, u64::from(PACKETS));
+                    assert_eq!(progress.diagnostics, PACKETS);
+                    break;
+                }
+                ImportAdvance::NeedsBudget { .. } => {
+                    panic!("the maximum boundary step budget covers every synthetic record")
+                }
+            }
+        }
+        let published = state
+            .finish_import(import)
+            .expect("the fully decoded capture publishes");
+        let dataset = state
+            .datasets
+            .get(published.dataset)
+            .expect("published dataset remains registered");
+        let packet_count = usize::try_from(PACKETS).expect("packet count fits usize");
+        let layers_per_packet =
+            usize::try_from(DECODER_MAX_LAYERS_PER_PACKET).expect("layer count fits usize");
+        let fields_per_packet =
+            usize::try_from(DECODER_MAX_FIELDS_PER_PACKET).expect("field count fits usize");
+        let children_per_packet =
+            usize::try_from(DECODER_MAX_FIELD_CHILDREN_PER_PACKET).expect("child count fits usize");
+        assert_eq!(dataset.packets().len(), packet_count);
+        assert_eq!(dataset.layers().len(), packet_count * layers_per_packet);
+        assert!(dataset.fields().len() <= packet_count * fields_per_packet);
+        assert!(dataset.field_children().len() <= packet_count * children_per_packet);
+        assert_eq!(dataset.diagnostics().len(), packet_count);
+        assert!(
+            dataset
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.code == packet_core::DiagnosticCode::RESOURCE_LIMIT)
+        );
+        assert!(
+            dataset
+                .packets()
+                .iter()
+                .all(|packet| packet.layers.length() == DECODER_MAX_LAYERS_PER_PACKET)
+        );
+    }
+
+    #[test]
+    fn ipv4_packet_beyond_the_field_max_baseline_fails_closed_and_reclaims_import() {
         const PACKETS: u32 = 1_025;
-        let capture = repeated_legacy_pcap(&maximal_vlan_arp_decode(), PACKETS);
+        let capture = repeated_legacy_pcap(&maximal_ipv4_field_decode(), PACKETS);
         let mut state = BoundaryState::new();
         let import = state
             .begin_import(capture)
@@ -2232,6 +2358,64 @@ mod tests {
         assert_eq!(
             failure.resource_limit(),
             Some(u64::from(CAPTURE_DECODED_FIELD_BASE_ALLOWANCE))
+        );
+        let progress = failure
+            .terminal_import_progress()
+            .expect("fatal decode saturation carries exact import progress");
+        assert_eq!(progress.phase, super::ImportPhase::Failed);
+        assert_eq!(progress.packets_retained, 1_024);
+
+        let cleanup = state
+            .resource_stats()
+            .expect("fatal import cleanup is exact");
+        assert_eq!(cleanup.active_imports, 0);
+        assert_eq!(cleanup.active_datasets, 0);
+        assert_eq!(cleanup.transient_import_input_bytes, 0);
+        assert_eq!(cleanup.current_owned_capture_bytes, 0);
+        assert_eq!(cleanup.total_logical_bytes_upper_bound, 0);
+    }
+
+    #[test]
+    fn packet_beyond_the_layer_max_baseline_fails_closed_and_reclaims_import() {
+        const PACKETS: u32 = 1_025;
+
+        // The real 12-layer IPv6 limit-marker path necessarily emits one
+        // diagnostic per packet and is covered above. This accounting decoder
+        // isolates layer exhaustion so the independent layer base can be
+        // tested past 1,024 packets without first reaching the diagnostic cap.
+        let capture = repeated_legacy_pcap(&[0], PACKETS);
+        let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
+        let mut state = BoundaryState::new();
+        let admission = state
+            .admit_import_input(capture_length)
+            .expect("the synthetic capture fits pre-copy admission");
+        assert_eq!(
+            admission.limits().max_layers,
+            CAPTURE_DECODED_LAYER_BASE_ALLOWANCE
+        );
+        let importer = packet_core::CaptureImporter::new_with_decoder(
+            capture,
+            admission.limits(),
+            Box::new(MaximumLayerTestDecoder),
+        )
+        .expect("the admitted synthetic capture constructs an importer");
+        let import = state
+            .imports
+            .insert(super::ImportEntry {
+                importer,
+                parser_buffer_bytes_upper_bound: admission.parser_buffer_bytes_upper_bound,
+                packet_index_bytes_upper_bound: admission.packet_index_bytes_upper_bound,
+                auxiliary_bytes_upper_bound: admission.auxiliary_bytes_upper_bound,
+            })
+            .expect("the import registry has capacity");
+
+        let failure = state
+            .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
+            .expect_err("the 1,025th maximum-layer packet fails closed");
+        assert_eq!(failure.code(), BoundaryErrorCode::RESOURCE_LIMIT);
+        assert_eq!(
+            failure.resource_limit(),
+            Some(u64::from(CAPTURE_DECODED_LAYER_BASE_ALLOWANCE))
         );
         let progress = failure
             .terminal_import_progress()

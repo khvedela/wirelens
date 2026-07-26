@@ -73,14 +73,24 @@ cargo test --locked -p packet-core --test import_properties
 FUZZ_NIGHTLY=nightly-2026-07-20
 rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
 cargo +"$FUZZ_NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
-for target in capture_import protocol_decode; do
+for target in capture_import protocol_decode network_decode; do
   for seed in "fuzz/corpus/$target"/*; do
     cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
   done
 done
 ```
 
-The weekly workflow uses the same pinned fuzz toolchain for bounded importer and protocol-decoder mutation campaigns. A local longer run can replace `capture_import` and its corpus path in `cargo +"$FUZZ_NIGHTLY" fuzz run capture_import fuzz/corpus/capture_import -- -max_total_time=600 -max_len=4096 -timeout=2 -rss_limit_mb=1024` with `protocol_decode` as needed. Keep corpus additions small and synthetic, and record their provenance and intent in [`fixtures/manifests`](fixtures/manifests).
+The weekly workflow uses the same pinned fuzz toolchain for bounded importer, whole-capture decoder,
+and focused network-decoder mutation campaigns. Local longer runs use the matching target and corpus;
+the focused target's extra selector byte makes its libFuzzer input limit 4,097 bytes:
+
+```sh
+cargo +"$FUZZ_NIGHTLY" fuzz run protocol_decode fuzz/corpus/protocol_decode -- -max_total_time=600 -max_len=4096 -timeout=2 -rss_limit_mb=1024
+cargo +"$FUZZ_NIGHTLY" fuzz run network_decode fuzz/corpus/network_decode -- -max_total_time=600 -max_len=4097 -timeout=2 -rss_limit_mb=1024
+```
+
+Keep corpus additions small and synthetic, and record their provenance and intent in
+[`fixtures/manifests`](fixtures/manifests).
 
 ## Changes and review
 

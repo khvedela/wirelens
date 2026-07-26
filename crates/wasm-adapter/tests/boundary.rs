@@ -6,12 +6,14 @@ use packet_core::{
 };
 use wasm_adapter::{
     API_VERSION, BATCH_SCHEMA_VERSION, BoundaryErrorCode, BoundaryHandle, BoundaryState,
-    CAPTURE_BYTES_PER_PACKET, CAPTURE_PACKET_BASE_ALLOWANCE, DisposeStatus, HandleKind,
-    ImportAdvance, ImportLimits, ImportPhase, ImportProgressSnapshot, MAX_CAPTURE_BLOCK_BYTES,
-    MAX_CAPTURE_BYTES, MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK, MAX_CAPTURE_DECODED_ITEMS_PER_STEP,
-    MAX_CAPTURE_PACKETS, MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES, MAX_EVIDENCE_BYTES,
-    MAX_IMPORT_HANDLES, MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS, MAX_PACKET_BATCH_BYTES,
-    MAX_PACKET_BATCH_ROWS, MIN_PACKET_BATCH_BYTES, PacketBatch, PacketBatchColumn,
+    CAPTURE_BYTES_PER_PACKET, CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
+    CAPTURE_DECODED_LAYER_BASE_ALLOWANCE, CAPTURE_FIELD_CHILD_BASE_ALLOWANCE,
+    CAPTURE_PACKET_BASE_ALLOWANCE, DisposeStatus, HandleKind, ImportAdvance, ImportLimits,
+    ImportPhase, ImportProgressSnapshot, MAX_CAPTURE_BLOCK_BYTES, MAX_CAPTURE_BYTES,
+    MAX_CAPTURE_DECODED_ITEMS_PER_BLOCK, MAX_CAPTURE_DECODED_ITEMS_PER_STEP, MAX_CAPTURE_PACKETS,
+    MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES, MAX_EVIDENCE_BYTES, MAX_IMPORT_HANDLES,
+    MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS, MAX_PACKET_BATCH_BYTES, MAX_PACKET_BATCH_ROWS,
+    MAX_TOTAL_LOGICAL_BYTES, MIN_PACKET_BATCH_BYTES, PacketBatch, PacketBatchColumn,
     packet_limit_for_capture,
 };
 
@@ -678,6 +680,22 @@ fn import_registry_cap_is_enforced_before_constructing_another_importer() {
     let capture = synthetic_pcap(&[]);
     let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
     let mut state = BoundaryState::new();
+    let one_import = state
+        .admit_import_input(capture_length)
+        .expect("one tiny capture fits the decoder-wide arena reservations");
+    assert_eq!(
+        one_import.limits().max_layers,
+        CAPTURE_DECODED_LAYER_BASE_ALLOWANCE
+    );
+    assert_eq!(
+        one_import.limits().max_fields,
+        CAPTURE_DECODED_FIELD_BASE_ALLOWANCE
+    );
+    assert_eq!(
+        one_import.limits().max_field_children,
+        CAPTURE_FIELD_CHILD_BASE_ALLOWANCE
+    );
+    assert!(one_import.resulting_logical_bytes_upper_bound() <= MAX_TOTAL_LOGICAL_BYTES);
     let mut imports = Vec::new();
     for _ in 0..MAX_IMPORT_HANDLES {
         imports.push(
@@ -700,6 +718,12 @@ fn import_registry_cap_is_enforced_before_constructing_another_importer() {
         capture_length * u64::try_from(MAX_IMPORT_HANDLES).expect("handle cap fits u64")
     );
     assert!(snapshot.transient_auxiliary_bytes_upper_bound > 0);
+    assert!(snapshot.total_logical_bytes_upper_bound <= MAX_TOTAL_LOGICAL_BYTES);
+    assert_eq!(
+        snapshot.total_logical_bytes_upper_bound,
+        one_import.resulting_logical_bytes_upper_bound()
+            * u64::try_from(MAX_IMPORT_HANDLES).expect("handle cap fits u64")
+    );
     assert_eq!(
         snapshot.total_logical_bytes_upper_bound,
         snapshot.transient_import_input_bytes
@@ -716,13 +740,9 @@ fn import_registry_cap_is_enforced_before_constructing_another_importer() {
             DisposeStatus::Disposed
         );
     }
-    assert_eq!(
-        state
-            .resource_stats()
-            .expect("cleanup is exact")
-            .active_imports,
-        0
-    );
+    let clean = state.resource_stats().expect("cleanup is exact");
+    assert_eq!(clean.active_imports, 0);
+    assert_eq!(clean.total_logical_bytes_upper_bound, 0);
 }
 
 #[test]
