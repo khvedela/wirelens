@@ -44,7 +44,10 @@ allocation is reported separately from live logical capture ownership. Buffer de
 transfer semantics; the report does not claim that unobservable browser-engine implementation copies
 were measured. A qualifying memory report requires Chromium's cross-origin-isolated
 `measureUserAgentSpecificMemory` API; a main-realm heap-only fallback is not accepted as worker/Wasm
-evidence.
+evidence. CI selects Playwright's full Chromium new-headless channel because the smaller headless
+shell omits the Performance Manager instrumentation behind that API. The harness enables Chromium's
+documented eager-measurement test mode to remove the randomized garbage-collection delay without
+substituting a different memory source.
 
 The exact generated `wasm-bindgen` exports and the version-1 worker operation set are recorded in
 the reviewed [`API.md`](API.md) snapshot. The contract verifier compares each production-generated

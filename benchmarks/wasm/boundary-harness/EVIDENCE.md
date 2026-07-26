@@ -1,6 +1,6 @@
 # Wasm boundary evidence
 
-Recorded 2026-07-26T18:25:18.875Z in chromium. The browser reported `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36` and 11 logical processors. Fixtures are deterministic, generated in memory, and contain no captured private traffic.
+Recorded 2026-07-26T18:39:16.938Z in chromium. The browser reported `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36` and 11 logical processors. Fixtures are deterministic, generated in memory, and contain no captured private traffic.
 
 This report is emitted only after the exact toolchain check, direct Cargo + `wasm-bindgen` production build, static binary-transport/API-signature contract check, TypeScript check, production bundle, and all assertions below pass.
 
@@ -8,20 +8,20 @@ This report is emitted only after the exact toolchain check, direct Cargo + `was
 
 | Measurement | Result | Limit |
 | --- | ---: | ---: |
-| Sparse ingest + index throughput (15,367,704 bytes) | 8806.7 MB/s | >= 50 MB/s |
-| Largest dense synchronous step | 6.79 ms | <= 200 ms |
-| Dense finalization checkpoint | 6.79 ms | <= 200 ms |
-| Median queued cancellation acknowledgement | 0.57 ms | <= 200 ms |
-| Cancellation while terminal batch is pending | 20.20 ms | <= 200 ms |
-| Largest option-dense hostile-tail step (2,101,248 decoded items behind the checkpoint) | 0.28 ms | <= 200 ms |
-| Option-dense hostile-tail cancellation | 0.02 ms | <= 200 ms |
-| Browser agent-cluster sampled high-water growth / dense capture | 1.96x | <= 2.5x |
+| Sparse ingest + index throughput (15,367,704 bytes) | 7335.4 MB/s | >= 50 MB/s |
+| Largest dense synchronous step | 1.90 ms | <= 200 ms |
+| Dense finalization checkpoint | 1.90 ms | <= 200 ms |
+| Median queued cancellation acknowledgement | 0.32 ms | <= 200 ms |
+| Cancellation while terminal batch is pending | 5.62 ms | <= 200 ms |
+| Largest option-dense hostile-tail step (2,101,248 decoded items behind the checkpoint) | 0.26 ms | <= 200 ms |
+| Option-dense hostile-tail cancellation | 0.03 ms | <= 200 ms |
+| Browser agent-cluster sampled high-water growth / dense capture | 1.99x | <= 2.5x |
 | Wasm linear-memory sampled high-water growth / dense capture | 1.72x | <= 2.5x |
 | Conservative modeled synchronous envelope / dense capture | 2.42x | <= 2.5x |
 | Retained capture + canonical index / dense capture | 1.31x | <= 2.5x |
 | Packet batch | 3,060,352 bytes | <= 8,388,608 bytes |
-| Packet-batch extraction + transfer | 148.1 MB/s | measured |
-| Evidence extraction + transfer | 2995.9 MB/s | measured |
+| Packet-batch extraction + transfer | 530.4 MB/s | measured |
+| Evidence extraction + transfer | 6168.1 MB/s | measured |
 | Same-size success + binary-transfer Wasm high-water growth | 0 bytes | 0 bytes |
 | Queued-cancellation Wasm high-water growth | 0 bytes | 0 bytes |
 | Fatal resource-limit Wasm high-water growth | 0 bytes | 0 bytes |

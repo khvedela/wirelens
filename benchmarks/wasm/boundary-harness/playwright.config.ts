@@ -1,6 +1,12 @@
 import { defineConfig } from "@playwright/test";
 
 const chromiumExecutablePath = process.env.WIRELENS_CHROMIUM_EXECUTABLE;
+const chromiumLaunchOptions = {
+  args: ["--enable-blink-features=ForceEagerMeasureMemory"],
+  ...(chromiumExecutablePath === undefined
+    ? {}
+    : { executablePath: chromiumExecutablePath }),
+};
 
 export default defineConfig({
   expect: { timeout: 5_000 },
@@ -11,9 +17,11 @@ export default defineConfig({
       name: "chromium",
       use: {
         browserName: "chromium",
-        ...(chromiumExecutablePath === undefined
-          ? {}
-          : { launchOptions: { executablePath: chromiumExecutablePath } }),
+        // Playwright's default headless shell omits the Performance Manager
+        // instrumentation required by measureUserAgentSpecificMemory. The
+        // chromium channel selects the full browser's new headless mode in CI.
+        ...(chromiumExecutablePath === undefined ? { channel: "chromium" } : {}),
+        launchOptions: chromiumLaunchOptions,
       },
     },
     { name: "firefox", use: { browserName: "firefox" } },
