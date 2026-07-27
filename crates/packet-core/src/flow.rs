@@ -4,10 +4,26 @@ use std::collections::BTreeMap;
 
 use crate::{
     ByteRange, CaptureDataset, CaptureTimestamp, FieldId, FieldValue, IndexRange, InterfaceId,
-    LayerFact, PacketId, PacketRecord,
+    LayerFact, PacketId, PacketRecord, TimestampResolution,
 };
 
 /// Identifier for one reconstructed flow.
+/// Stable duration measured in interface packet timestamps.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TcpFlowDuration {
+    /// Number of elapsed timestamp ticks.
+    pub ticks: u64,
+    /// Timestamp resolution used for ticks.
+    pub resolution: TimestampResolution,
+}
+
+impl TcpFlowDuration {
+    /// Returns `true` when this duration represents at least one tick.
+    pub const fn is_nonzero(&self) -> bool {
+        self.ticks > 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FlowId(pub u32);
 
@@ -67,6 +83,16 @@ struct FlowAccumulator {
     last_timestamp: Option<CaptureTimestamp>,
 }
 
+impl FlowAccumulator {
+    const fn packets_total(&self) -> u64 {
+        self.packets_from_a + self.packets_from_b
+    }
+
+    const fn bytes_total(&self) -> u64 {
+        self.bytes_from_a + self.bytes_from_b
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TcpDirectionAccumulator {
     last_sequence: Option<u32>,
@@ -89,8 +115,50 @@ struct TcpFlowAccumulator {
     retransmission: Option<TcpDirectionalIndicator>,
     duplicate_ack: Option<TcpDirectionalIndicator>,
     out_of_order: Option<TcpDirectionalIndicator>,
+    first_syn_timestamp: Option<CaptureTimestamp>,
+    established_ack_timestamp: Option<CaptureTimestamp>,
+    first_data_timestamp: Option<CaptureTimestamp>,
     direction_a: TcpDirectionAccumulator,
     direction_b: TcpDirectionAccumulator,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PacketSizeAccumulator {
+    sample_count: u64,
+    min: Option<u32>,
+    max: Option<u32>,
+    total: u64,
+    buckets: [u64; 8],
+}
+
+impl PacketSizeAccumulator {
+    fn record(&mut self, size: u32) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.total = self.total.saturating_add(u64::from(size));
+        self.min = Some(self.min.map_or(size, |value| value.min(size)));
+        self.max = Some(self.max.map_or(size, |value| value.max(size)));
+
+        let bucket = match size {
+            0..=63 => 0,
+            64..=127 => 1,
+            128..=255 => 2,
+            256..=511 => 3,
+            512..=1023 => 4,
+            1024..=2047 => 5,
+            2048..=4095 => 6,
+            _ => 7,
+        };
+        self.buckets[bucket] = self.buckets[bucket].saturating_add(1);
+    }
+}
+
+#[derive(Debug, Default)]
+struct FlowMetricAccumulator {
+    packets: FlowAccumulator,
+    packet_sizes: PacketSizeAccumulator,
+    tcp: Option<TcpFlowAccumulator>,
+    first_dns_query: BTreeMap<u16, CaptureTimestamp>,
+    dns_response_latency: Option<TcpFlowDuration>,
 }
 
 /// Single packet evidence reference.
@@ -221,6 +289,79 @@ pub struct TcpConnectionHeuristic {
     /// Out-of-order sequence behavior.
     pub out_of_order: Option<TcpDirectionalIndicator>,
     /// True when conclusions are limited by missing or one-sided observation.
+    pub partial_capture: bool,
+}
+
+/// Packet-size distribution for a flow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSizeDistribution {
+    /// Number of packets used by this distribution.
+    pub sample_count: u64,
+    /// Smallest observed captured packet size.
+    pub min_size_bytes: Option<u32>,
+    /// Largest observed captured packet size.
+    pub max_size_bytes: Option<u32>,
+    /// Sum of captured bytes across all sampled packets.
+    pub total_size_bytes: u64,
+    /// Packet histogram with fixed bins.
+    ///
+    /// Bins (inclusive) are: 0-63, 64-127, 128-255, 256-511, 512-1023, 1024-2047,
+    /// 2048-4095, and 4096+.
+    pub buckets: [u64; 8],
+}
+
+impl From<PacketSizeAccumulator> for PacketSizeDistribution {
+    fn from(accumulator: PacketSizeAccumulator) -> Self {
+        Self {
+            sample_count: accumulator.sample_count,
+            min_size_bytes: accumulator.min,
+            max_size_bytes: accumulator.max,
+            total_size_bytes: accumulator.total,
+            buckets: accumulator.buckets,
+        }
+    }
+}
+
+/// Per-flow traffic and timing summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlowMetrics {
+    /// Stable zero-based flow identity.
+    pub id: FlowId,
+    /// Capture interface that owns this flow identity.
+    pub interface_id: InterfaceId,
+    /// Transport protocol for the flow.
+    pub protocol: TransportProtocol,
+    /// Canonical endpoint order (`endpoint_a` <= `endpoint_b`).
+    pub endpoint_a: FlowEndpoint,
+    /// Canonical endpoint order (`endpoint_b` >= `endpoint_a`).
+    pub endpoint_b: FlowEndpoint,
+    /// Total packet count across both directions.
+    pub packets_total: u64,
+    /// Total bytes across both directions.
+    pub bytes_total: u64,
+    /// Packets from `endpoint_a` to `endpoint_b`.
+    pub packets_a_to_b: u64,
+    /// Packets from `endpoint_b` to `endpoint_a`.
+    pub packets_b_to_a: u64,
+    /// Captured bytes from `endpoint_a` to `endpoint_b`.
+    pub bytes_a_to_b: u64,
+    /// Captured bytes from `endpoint_b` to `endpoint_a`.
+    pub bytes_b_to_a: u64,
+    /// First known packet timestamp for the flow.
+    pub first_timestamp: Option<CaptureTimestamp>,
+    /// Last known packet timestamp for the flow.
+    pub last_timestamp: Option<CaptureTimestamp>,
+    /// End-to-end duration between first and last timestamp, when resolvable.
+    pub duration: Option<TcpFlowDuration>,
+    /// Packet-size summary distribution.
+    pub packet_size_distribution: PacketSizeDistribution,
+    /// Estimated TCP handshake latency (SYN → final ACK), if inferable.
+    pub handshake_latency: Option<TcpFlowDuration>,
+    /// DNS request/response latency for the earliest inferable transaction, if any.
+    pub dns_response_latency: Option<TcpFlowDuration>,
+    /// Time to first post-handshake data packet for TCP flows, when inferable.
+    pub time_to_first_data: Option<TcpFlowDuration>,
+    /// True when results are likely constrained by a partial viewpoint.
     pub partial_capture: bool,
 }
 
@@ -359,6 +500,92 @@ impl CaptureDataset {
         }
         Ok(output.into_boxed_slice())
     }
+
+    /// Reconstructs per-flow traffic and timing metrics from decoded fields.
+    ///
+    /// The returned list is deterministic and aligns with the same canonical flow key
+    /// ordering used by bidirectional flow reconstruction.
+    pub fn reconstruct_flow_metrics(&self) -> Result<Box<[FlowMetrics]>, FlowReconstructionError> {
+        let mut flows: BTreeMap<FlowKey, FlowMetricAccumulator> = BTreeMap::new();
+
+        for packet in self.packets() {
+            let Some((key, direction)) = packet_flow_key(self, packet)? else {
+                continue;
+            };
+
+            let tcp = read_tcp_packet_data(self, packet)?;
+            let dns = read_dns_packet_data(self, packet)?;
+            let accumulator = flows.entry(key).or_default();
+            apply_packet_to_metrics(accumulator, packet, direction, tcp, dns);
+        }
+
+        let mut output = Vec::new();
+        for (index, (key, accumulator)) in flows.into_iter().enumerate() {
+            let id = FlowId(
+                u32::try_from(index).map_err(|_| FlowReconstructionError::DatasetInvariant)?,
+            );
+            let duration = match (
+                accumulator.packets.first_timestamp,
+                accumulator.packets.last_timestamp,
+            ) {
+                (Some(first), Some(last)) => duration_from_timestamps(first, last),
+                _ => None,
+            };
+            let handshake_latency = match &accumulator.tcp {
+                Some(tcp) => tcp
+                    .first_syn_timestamp
+                    .and_then(|start| {
+                        tcp.established_ack_timestamp
+                            .and_then(|end| duration_from_timestamps(start, end))
+                    })
+                    .filter(|value| value.is_nonzero()),
+                None => None,
+            };
+            let time_to_first_data = match &accumulator.tcp {
+                Some(tcp) => tcp
+                    .established_ack_timestamp
+                    .and_then(|start| {
+                        tcp.first_data_timestamp
+                            .and_then(|end| duration_from_timestamps(start, end))
+                    })
+                    .filter(|value| value.is_nonzero()),
+                None => None,
+            };
+            let partial_capture = accumulator
+                .tcp
+                .as_ref()
+                .is_none_or(|tcp| classify_tcp_is_partial_capture(tcp))
+                || match key.protocol {
+                    TransportProtocol::Tcp | TransportProtocol::Udp => {
+                        accumulator.packets.packets_from_a == 0
+                            || accumulator.packets.packets_from_b == 0
+                    }
+                };
+
+            output.push(FlowMetrics {
+                id,
+                interface_id: key.interface_id,
+                protocol: key.protocol,
+                endpoint_a: key.endpoint_a,
+                endpoint_b: key.endpoint_b,
+                packets_total: accumulator.packets.packets_total(),
+                bytes_total: accumulator.packets.bytes_total(),
+                packets_a_to_b: accumulator.packets.packets_from_a,
+                packets_b_to_a: accumulator.packets.packets_from_b,
+                bytes_a_to_b: accumulator.packets.bytes_from_a,
+                bytes_b_to_a: accumulator.packets.bytes_from_b,
+                first_timestamp: accumulator.packets.first_timestamp,
+                last_timestamp: accumulator.packets.last_timestamp,
+                duration,
+                packet_size_distribution: PacketSizeDistribution::from(accumulator.packet_sizes),
+                handshake_latency,
+                dns_response_latency: accumulator.dns_response_latency,
+                time_to_first_data,
+                partial_capture,
+            });
+        }
+        Ok(output.into_boxed_slice())
+    }
 }
 
 fn apply_packet_to_flow(
@@ -401,12 +628,21 @@ fn apply_packet_to_flow(
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TcpPacketData {
+    is_tcp: bool,
     sequence_number: Option<u32>,
     acknowledgment_number: Option<u32>,
     syn: bool,
     ack: bool,
     fin: bool,
     rst: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DnsPacketData {
+    transaction_id: Option<u16>,
+    is_response: Option<bool>,
+    question_count: Option<u16>,
+    answer_count: Option<u16>,
 }
 
 fn read_tcp_packet_data(
@@ -432,6 +668,7 @@ fn read_tcp_packet_data(
             continue;
         }
         saw_tcp_layer = true;
+        data.is_tcp = true;
         let Some(root) = layer.root_field else {
             continue;
         };
@@ -492,6 +729,79 @@ fn read_tcp_packet_data(
     Ok(data)
 }
 
+fn read_dns_packet_data(
+    dataset: &CaptureDataset,
+    packet: &PacketRecord,
+) -> Result<DnsPacketData, FlowReconstructionError> {
+    let mut data = DnsPacketData::default();
+    let mut saw_dns_layer = false;
+    let layer_start = usize::try_from(packet.layers.start())
+        .map_err(|_| FlowReconstructionError::DatasetInvariant)?;
+    let layer_end = usize::try_from(packet.layers.end())
+        .map_err(|_| FlowReconstructionError::DatasetInvariant)?;
+    let layers = dataset
+        .layers()
+        .get(layer_start..layer_end)
+        .ok_or(FlowReconstructionError::DatasetInvariant)?;
+
+    for layer in layers {
+        let protocol = dataset
+            .string(layer.protocol)
+            .ok_or(FlowReconstructionError::DatasetInvariant)?;
+        if protocol != "dns" {
+            continue;
+        }
+        saw_dns_layer = true;
+        let Some(root) = layer.root_field else {
+            continue;
+        };
+        let mut stack = Vec::new();
+        stack.push(root);
+        while let Some(field_id) = stack.pop() {
+            let field = dataset
+                .fields()
+                .get(field_id.0 as usize)
+                .ok_or(FlowReconstructionError::DatasetInvariant)?;
+            let field_name = dataset
+                .string(field.name)
+                .ok_or(FlowReconstructionError::DatasetInvariant)?;
+            match field_name {
+                "transaction_id" => {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        data.transaction_id = u16::try_from(value).ok();
+                    }
+                }
+                "is_response" => {
+                    if let FieldValue::Boolean(value) = field.value {
+                        data.is_response = Some(value);
+                    }
+                }
+                "question_count" => {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        data.question_count = u16::try_from(value).ok();
+                    }
+                }
+                "answer_count" => {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        data.answer_count = u16::try_from(value).ok();
+                    }
+                }
+                _ => {}
+            }
+
+            let children = field_children(dataset, field.children)?;
+            for child in children.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+
+    if !saw_dns_layer {
+        return Ok(DnsPacketData::default());
+    }
+    Ok(data)
+}
+
 fn apply_tcp_packet_to_flow(
     accumulator: &mut TcpFlowAccumulator,
     packet: &PacketRecord,
@@ -502,6 +812,7 @@ fn apply_tcp_packet_to_flow(
         packet_id: packet.id,
     };
     apply_packet_to_flow(&mut accumulator.packets, packet, direction);
+    let timestamp = packet.timestamp;
 
     if let FlowDirection::AToB | FlowDirection::BToA = direction {
         let directional_state = match direction {
@@ -564,6 +875,9 @@ fn apply_tcp_packet_to_flow(
         if accumulator.first_syn.is_none() {
             accumulator.first_syn = Some(evidence);
             accumulator.first_syn_direction = Some(direction);
+            if let Some(timestamp) = timestamp {
+                accumulator.first_syn_timestamp = Some(timestamp);
+            }
         } else if accumulator.first_syn_direction == Some(direction)
             && accumulator.repeated_syn.is_none()
         {
@@ -586,7 +900,21 @@ fn apply_tcp_packet_to_flow(
             && accumulator.established_ack.is_none()
         {
             accumulator.established_ack = Some(evidence);
+            if let Some(timestamp) = timestamp {
+                accumulator.established_ack_timestamp = Some(timestamp);
+            }
         }
+    }
+
+    if tcp.sequence_number.is_some()
+        && !tcp.syn
+        && !tcp.fin
+        && !tcp.rst
+        && !tcp.ack
+        && accumulator.first_data_timestamp.is_none()
+        && let Some(timestamp) = timestamp
+    {
+        accumulator.first_data_timestamp = Some(timestamp);
     }
 
     if tcp.rst {
@@ -599,6 +927,59 @@ fn apply_tcp_packet_to_flow(
         } else if accumulator.fin_last.is_none() {
             accumulator.fin_last = Some((direction, evidence));
         }
+    }
+}
+
+fn apply_packet_to_metrics(
+    accumulator: &mut FlowMetricAccumulator,
+    packet: &PacketRecord,
+    direction: FlowDirection,
+    tcp: TcpPacketData,
+    dns: DnsPacketData,
+) {
+    apply_packet_to_flow(&mut accumulator.packets, packet, direction);
+    accumulator.packet_sizes.record(packet.captured_length);
+
+    if tcp.is_tcp {
+        let tcp_accumulator = accumulator
+            .tcp
+            .get_or_insert_with(TcpFlowAccumulator::default);
+        apply_tcp_packet_to_flow(tcp_accumulator, packet, direction, tcp);
+    }
+
+    let Some(packet_timestamp) = packet.timestamp else {
+        return;
+    };
+    let Some(transaction_id) = dns.transaction_id else {
+        return;
+    };
+
+    let is_response = dns.is_response.unwrap_or(false);
+    if is_response {
+        if let Some(query_timestamp) = accumulator.first_dns_query.remove(&transaction_id) {
+            if let Some(dns_response_latency) =
+                duration_from_timestamps(query_timestamp, packet_timestamp)
+            {
+                match accumulator.dns_response_latency {
+                    None => accumulator.dns_response_latency = Some(dns_response_latency),
+                    Some(existing) if dns_response_latency.ticks < existing.ticks => {
+                        accumulator.dns_response_latency = Some(dns_response_latency);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        return;
+    }
+
+    if dns
+        .question_count
+        .is_none_or(|question_count| question_count > 0)
+    {
+        accumulator
+            .first_dns_query
+            .entry(transaction_id)
+            .or_insert(packet_timestamp);
     }
 }
 
@@ -704,6 +1085,35 @@ fn classify_tcp_is_partial_capture(accumulator: &TcpFlowAccumulator) -> bool {
         return true;
     }
     false
+}
+
+fn duration_from_timestamps(
+    start: CaptureTimestamp,
+    end: CaptureTimestamp,
+) -> Option<TcpFlowDuration> {
+    if start.resolution() != end.resolution() {
+        return None;
+    }
+    if end.cmp_instant(start).is_lt() {
+        return None;
+    }
+    let ticks_per_second = start.resolution().ticks_per_second()?;
+
+    let mut seconds_delta = end.seconds().checked_sub(start.seconds())?;
+    let mut fraction_delta = end.fraction().checked_sub(start.fraction())?;
+    if end.fraction() < start.fraction() {
+        seconds_delta = seconds_delta.checked_sub(1)?;
+        fraction_delta = fraction_delta.checked_add(ticks_per_second)?;
+    }
+
+    let total_ticks = u64::try_from(seconds_delta)
+        .ok()?
+        .checked_mul(ticks_per_second)?
+        .checked_add(fraction_delta)?;
+    Some(TcpFlowDuration {
+        ticks: total_ticks,
+        resolution: start.resolution(),
+    })
 }
 
 fn packet_flow_key(
@@ -978,6 +1388,25 @@ mod tests {
         rst: bool,
     }
 
+    #[derive(Clone, Copy)]
+    struct DnsPacketSpec {
+        transaction_id: u16,
+        is_response: bool,
+        question_count: u16,
+        answer_count: u16,
+    }
+
+    #[derive(Clone, Copy)]
+    struct PacketSpecWithDns {
+        interface_id: InterfaceId,
+        timestamp: Option<CaptureTimestamp>,
+        network: NetworkSpec,
+        transport: Option<TransportSpec>,
+        tcp: Option<TcpPacketSpec>,
+        dns: Option<DnsPacketSpec>,
+        captured_length: u32,
+    }
+
     struct PacketSpec {
         interface_id: InterfaceId,
         timestamp: Option<CaptureTimestamp>,
@@ -1011,6 +1440,29 @@ mod tests {
 
     fn timestamps_bounds(
         packets: &[PacketSpec],
+    ) -> (Option<CaptureTimestamp>, Option<CaptureTimestamp>) {
+        let mut earliest = None;
+        let mut latest = None;
+        for packet in packets {
+            let Some(timestamp) = packet.timestamp else {
+                continue;
+            };
+            if earliest
+                .is_none_or(|existing: CaptureTimestamp| existing.cmp_instant(timestamp).is_gt())
+            {
+                earliest = Some(timestamp);
+            }
+            if latest
+                .is_none_or(|existing: CaptureTimestamp| existing.cmp_instant(timestamp).is_lt())
+            {
+                latest = Some(timestamp);
+            }
+        }
+        (earliest, latest)
+    }
+
+    fn timestamps_bounds_with_dns(
+        packets: &[PacketSpecWithDns],
     ) -> (Option<CaptureTimestamp>, Option<CaptureTimestamp>) {
         let mut earliest = None;
         let mut latest = None;
@@ -1201,6 +1653,87 @@ mod tests {
         root
     }
 
+    #[derive(Clone, Copy)]
+    struct DnsStringIds {
+        ipv4: StringId,
+        ipv6: StringId,
+        tcp: StringId,
+        udp: StringId,
+        source_address: StringId,
+        destination_address: StringId,
+        source_port: StringId,
+        destination_port: StringId,
+        sequence_number: StringId,
+        acknowledgment_number: StringId,
+        syn: StringId,
+        ack: StringId,
+        fin: StringId,
+        rst: StringId,
+        dns: StringId,
+        transaction_id: StringId,
+        is_response: StringId,
+        question_count: StringId,
+        answer_count: StringId,
+    }
+
+    fn add_dns_root(
+        fields: &mut Vec<DecodedField>,
+        field_children: &mut Vec<FieldId>,
+        packet_range: ByteRange,
+        ids: &DnsStringIds,
+        dns: DnsPacketSpec,
+    ) -> FieldId {
+        let root = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.dns,
+            value: FieldValue::None,
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
+
+        let transaction_id = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.transaction_id,
+            value: FieldValue::Unsigned(u64::from(dns.transaction_id)),
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
+        let is_response = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.is_response,
+            value: FieldValue::Boolean(dns.is_response),
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
+        let question_count = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.question_count,
+            value: FieldValue::Unsigned(u64::from(dns.question_count)),
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
+        let answer_count = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.answer_count,
+            value: FieldValue::Unsigned(u64::from(dns.answer_count)),
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
+
+        let children_start = u32::try_from(field_children.len()).expect("children index fits u32");
+        field_children.push(transaction_id);
+        field_children.push(is_response);
+        field_children.push(question_count);
+        field_children.push(answer_count);
+        fields[root.0 as usize].children = IndexRange::new(
+            children_start,
+            u32::try_from(field_children.len() - children_start as usize)
+                .expect("child range length fits u32"),
+        )
+        .expect("dns root child span is valid");
+        root
+    }
+
     fn build_dataset(packets: &[PacketSpec]) -> CaptureDataset {
         let interface_count = packets
             .iter()
@@ -1369,6 +1902,239 @@ mod tests {
         }
 
         let (started_at, ended_at) = timestamps_bounds(packets);
+        if let Some(section) = sections.get_mut(0) {
+            section.byte_range = ByteRange::new(
+                0,
+                u32::try_from(bytes.len()).expect("section byte length fits u32"),
+            )
+            .expect("section range valid");
+        }
+        let byte_length = u64::try_from(bytes.len()).expect("byte length fits");
+        CaptureDataset::from_parts(CaptureDatasetParts {
+            metadata: CaptureMetadata {
+                format: CaptureFormat::Pcap,
+                byte_length,
+                packet_count: u64::try_from(packet_records.len()).expect("packet count fits"),
+                started_at,
+                ended_at,
+            },
+            bytes: bytes.into_boxed_slice(),
+            sections: sections.into_boxed_slice(),
+            interfaces: interfaces.into_boxed_slice(),
+            packets: packet_records.into_boxed_slice(),
+            layers: layers.into_boxed_slice(),
+            fields: fields.into_boxed_slice(),
+            field_children: field_children.into_boxed_slice(),
+            diagnostics: diagnostics.into_boxed_slice(),
+            strings: strings.into_boxed_slice(),
+        })
+        .expect("test dataset is valid")
+    }
+
+    fn build_dataset_with_dns(packets: &[PacketSpecWithDns]) -> CaptureDataset {
+        let interface_count = packets
+            .iter()
+            .map(|packet| packet.interface_id.0)
+            .max()
+            .map_or(0, |id| id + 1);
+        let strings = vec![
+            "ipv4".into(),
+            "ipv6".into(),
+            "tcp".into(),
+            "udp".into(),
+            "source_address".into(),
+            "destination_address".into(),
+            "source_port".into(),
+            "destination_port".into(),
+            "sequence_number".into(),
+            "acknowledgment_number".into(),
+            "syn".into(),
+            "ack".into(),
+            "fin".into(),
+            "rst".into(),
+            "dns".into(),
+            "transaction_id".into(),
+            "is_response".into(),
+            "question_count".into(),
+            "answer_count".into(),
+        ];
+        let ids = DnsStringIds {
+            ipv4: StringId(0),
+            ipv6: StringId(1),
+            tcp: StringId(2),
+            udp: StringId(3),
+            source_address: StringId(4),
+            destination_address: StringId(5),
+            source_port: StringId(6),
+            destination_port: StringId(7),
+            sequence_number: StringId(8),
+            acknowledgment_number: StringId(9),
+            syn: StringId(10),
+            ack: StringId(11),
+            fin: StringId(12),
+            rst: StringId(13),
+            dns: StringId(14),
+            transaction_id: StringId(15),
+            is_response: StringId(16),
+            question_count: StringId(17),
+            answer_count: StringId(18),
+        };
+        let legacy_ids = StringIds {
+            ipv4: ids.ipv4,
+            ipv6: ids.ipv6,
+            tcp: ids.tcp,
+            udp: ids.udp,
+            source_address: ids.source_address,
+            destination_address: ids.destination_address,
+            source_port: ids.source_port,
+            destination_port: ids.destination_port,
+            sequence_number: ids.sequence_number,
+            acknowledgment_number: ids.acknowledgment_number,
+            syn: ids.syn,
+            ack: ids.ack,
+            fin: ids.fin,
+            rst: ids.rst,
+        };
+        let mut sections = vec![crate::model::SectionMetadata {
+            id: crate::model::SectionId(0),
+            byte_range: ByteRange::new(0, 0).expect("placeholder section range"),
+            byte_order: ByteOrder::LittleEndian,
+            interfaces: IndexRange::new(0, interface_count).expect("interface span is valid"),
+        }];
+        let mut interfaces = Vec::new();
+        for index in 0..interface_count {
+            interfaces.push(InterfaceMetadata {
+                id: InterfaceId(index),
+                section_id: crate::model::SectionId(0),
+                byte_range: ByteRange::new(u64::from(index * 8), 8).expect("interface range valid"),
+                section_index: index,
+                link_type: LinkType(1),
+                snap_length: 65_535,
+                timestamp_resolution: TimestampResolution::Decimal(6),
+                name: None,
+            });
+        }
+
+        let mut bytes = Vec::new();
+        let mut packet_records = Vec::new();
+        let mut layers = Vec::new();
+        let mut fields = Vec::new();
+        let mut field_children = Vec::new();
+        let diagnostics = Vec::new();
+
+        for (index, packet) in packets.iter().enumerate() {
+            let payload_len = packet.captured_length.max(match packet.network {
+                NetworkSpec::V4(_, _) => 32,
+                NetworkSpec::V6(_, _) => 64,
+            });
+            let packet_start = u64::try_from(bytes.len()).expect("byte cursor fits");
+            bytes.resize(
+                bytes.len() + usize::try_from(payload_len).expect("payload len fits usize"),
+                0,
+            );
+
+            match packet.network {
+                NetworkSpec::V4(source, destination) => {
+                    let start = usize::try_from(packet_start).expect("start index fits");
+                    bytes[start..start + 4].copy_from_slice(&source);
+                    bytes[start + 4..start + 8].copy_from_slice(&destination);
+                }
+                NetworkSpec::V6(source, destination) => {
+                    let start = usize::try_from(packet_start).expect("start index fits");
+                    bytes[start..start + 16].copy_from_slice(&source);
+                    bytes[start + 16..start + 32].copy_from_slice(&destination);
+                }
+            }
+
+            let packet_range =
+                ByteRange::new(packet_start, payload_len).expect("packet range valid");
+            let layer_start = u32::try_from(layers.len()).expect("layer span fits u32");
+            match packet.network {
+                NetworkSpec::V4(..) => {
+                    let root = add_network_root(
+                        &mut fields,
+                        &mut field_children,
+                        packet_start,
+                        packet_range,
+                        packet.network,
+                        &legacy_ids,
+                        ids.ipv4,
+                    );
+                    layers.push(LayerFact {
+                        protocol: ids.ipv4,
+                        byte_range: packet_range,
+                        root_field: Some(root),
+                    });
+                }
+                NetworkSpec::V6(..) => {
+                    let root = add_network_root(
+                        &mut fields,
+                        &mut field_children,
+                        packet_start,
+                        packet_range,
+                        packet.network,
+                        &legacy_ids,
+                        ids.ipv6,
+                    );
+                    layers.push(LayerFact {
+                        protocol: ids.ipv6,
+                        byte_range: packet_range,
+                        root_field: Some(root),
+                    });
+                }
+            }
+
+            if let Some(transport) = packet.transport {
+                let (protocol, source_port, destination_port) = match transport {
+                    TransportSpec::Tcp(source_port, destination_port) => {
+                        (ids.tcp, source_port, destination_port)
+                    }
+                    TransportSpec::Udp(source_port, destination_port) => {
+                        (ids.udp, source_port, destination_port)
+                    }
+                };
+                let root = add_transport_root(
+                    &mut fields,
+                    &mut field_children,
+                    packet_range,
+                    protocol,
+                    &legacy_ids,
+                    source_port,
+                    destination_port,
+                    packet.tcp,
+                );
+                layers.push(LayerFact {
+                    protocol,
+                    byte_range: packet_range,
+                    root_field: Some(root),
+                });
+            }
+
+            if let Some(dns) = packet.dns {
+                let root = add_dns_root(&mut fields, &mut field_children, packet_range, &ids, dns);
+                layers.push(LayerFact {
+                    protocol: ids.dns,
+                    byte_range: packet_range,
+                    root_field: Some(root),
+                });
+            }
+
+            let layer_end = u32::try_from(layers.len()).expect("layer span fits u32");
+            packet_records.push(PacketRecord {
+                id: PacketId(u32::try_from(index).expect("packet id fits")),
+                section_id: crate::model::SectionId(0),
+                interface_id: packet.interface_id,
+                timestamp: packet.timestamp,
+                captured_length: payload_len,
+                original_length: payload_len,
+                data: packet_range,
+                layers: IndexRange::new(layer_start, layer_end - layer_start)
+                    .expect("packet layer span valid"),
+                diagnostics: IndexRange::default(),
+            });
+        }
+
+        let (started_at, ended_at) = timestamps_bounds_with_dns(packets);
         if let Some(section) = sections.get_mut(0) {
             section.byte_range = ByteRange::new(
                 0,
@@ -1907,6 +2673,183 @@ mod tests {
                 }),
                 confidence: TcpHeuristicConfidence::Certain,
             }
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_metrics_computes_directional_totals_and_duration() {
+        let dataset = build_dataset(&[
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(53, 53)),
+                tcp: None,
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 250_000)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(53, 53)),
+                tcp: None,
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(2, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(53, 53)),
+                tcp: None,
+            },
+        ]);
+        let metrics = dataset
+            .reconstruct_flow_metrics()
+            .expect("flow metrics reconstruction succeeds");
+        assert_eq!(metrics.len(), 1);
+        let flow = &metrics[0];
+        assert_eq!(flow.packets_total, 3);
+        assert_eq!(flow.bytes_total, 96);
+        assert_eq!(flow.packets_a_to_b, 2);
+        assert_eq!(flow.packets_b_to_a, 1);
+        assert_eq!(flow.bytes_a_to_b, 64);
+        assert_eq!(flow.bytes_b_to_a, 32);
+        assert_eq!(
+            flow.duration,
+            Some(TcpFlowDuration {
+                ticks: 1_000_000,
+                resolution: TimestampResolution::Decimal(6),
+            })
+        );
+        assert_eq!(flow.packet_size_distribution.min_size_bytes, Some(32));
+        assert_eq!(flow.packet_size_distribution.max_size_bytes, Some(32));
+        assert_eq!(flow.packet_size_distribution.total_size_bytes, 96);
+        assert_eq!(
+            flow.packet_size_distribution.buckets,
+            [3, 0, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_metrics_estimates_handshake_and_first_data_timing() {
+        let dataset = build_dataset(&[
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(12_345, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1_000),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(2, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 12_345)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(2_000),
+                    acknowledgment_number: Some(1_001),
+                    syn: true,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(3, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(12_345, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1_001),
+                    acknowledgment_number: Some(2_001),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(4, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(12_345, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1_002),
+                    acknowledgment_number: Some(2_001),
+                    syn: false,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+        ]);
+        let metrics = dataset
+            .reconstruct_flow_metrics()
+            .expect("flow metrics reconstruction succeeds");
+        let flow = &metrics[0];
+        assert_eq!(
+            flow.handshake_latency,
+            Some(TcpFlowDuration {
+                ticks: 2_000_000,
+                resolution: TimestampResolution::Decimal(6),
+            })
+        );
+        assert_eq!(
+            flow.time_to_first_data,
+            Some(TcpFlowDuration {
+                ticks: 1_000_000,
+                resolution: TimestampResolution::Decimal(6),
+            })
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_metrics_reports_dns_response_latency() {
+        let dataset = build_dataset_with_dns(&[
+            PacketSpecWithDns {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 53]),
+                transport: Some(TransportSpec::Udp(53_001, 53)),
+                tcp: None,
+                dns: Some(DnsPacketSpec {
+                    transaction_id: 0x1234,
+                    is_response: false,
+                    question_count: 1,
+                    answer_count: 0,
+                }),
+                captured_length: 32,
+            },
+            PacketSpecWithDns {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 250_000)),
+                network: NetworkSpec::V4([10, 0, 0, 53], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Udp(53, 53_001)),
+                tcp: None,
+                dns: Some(DnsPacketSpec {
+                    transaction_id: 0x1234,
+                    is_response: true,
+                    question_count: 0,
+                    answer_count: 1,
+                }),
+                captured_length: 32,
+            },
+        ]);
+        let metrics = dataset
+            .reconstruct_flow_metrics()
+            .expect("flow metrics reconstruction succeeds");
+        let flow = &metrics[0];
+        assert_eq!(
+            flow.dns_response_latency,
+            Some(TcpFlowDuration {
+                ticks: 250_000,
+                resolution: TimestampResolution::Decimal(6),
+            })
         );
     }
 }
