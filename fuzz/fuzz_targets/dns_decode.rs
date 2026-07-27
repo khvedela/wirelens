@@ -11,62 +11,63 @@ use protocol_decoders::{
 };
 
 const HEX_PREFIX: &[u8] = b"hex:";
-const MAX_NETWORK_BYTES: usize = 4_096;
-const MAX_FUZZ_INPUT_BYTES: usize = MAX_NETWORK_BYTES + 1;
+const MAX_DNS_BYTES: usize = 4_096;
+const MAX_FUZZ_INPUT_BYTES: usize = MAX_DNS_BYTES + 1;
 const MAX_ENCODED_BYTES: usize = HEX_PREFIX.len() + (MAX_FUZZ_INPUT_BYTES * 2) + 128;
 const ETHERNET_HEADER_BYTES: usize = 14;
-const VLAN_HEADER_BYTES: usize = 18;
+const IPV4_HEADER_BYTES: usize = 20;
+const UDP_HEADER_BYTES: usize = 8;
+const TCP_HEADER_BYTES: usize = 20;
+const TCP_DNS_LENGTH_BYTES: usize = 2;
 const LEGACY_HEADER_BYTES: usize = 24;
 const LEGACY_RECORD_HEADER_BYTES: usize = 16;
-const PCAPNG_SECTION_BYTES: usize = 28;
-const PCAPNG_INTERFACE_BYTES: usize = 20;
-const PCAPNG_PACKET_OVERHEAD_BYTES: usize = 32;
-const MAX_FRAME_BYTES: usize = VLAN_HEADER_BYTES + MAX_NETWORK_BYTES;
-const MAX_PCAPNG_PACKET_BYTES: usize = PCAPNG_PACKET_OVERHEAD_BYTES + align4(MAX_FRAME_BYTES);
-const MAX_WRAPPED_CAPTURE_BYTES: usize =
-    PCAPNG_SECTION_BYTES + PCAPNG_INTERFACE_BYTES + MAX_PCAPNG_PACKET_BYTES;
-const MAX_WRAPPED_BLOCK_BYTES: u32 = MAX_PCAPNG_PACKET_BYTES as u32;
-const MAX_DRIVER_STEPS: usize = 16;
+const MAX_TRANSPORT_BYTES: usize = TCP_HEADER_BYTES + TCP_DNS_LENGTH_BYTES + MAX_DNS_BYTES;
+const MAX_FRAME_BYTES: usize = ETHERNET_HEADER_BYTES + IPV4_HEADER_BYTES + MAX_TRANSPORT_BYTES;
+const MAX_RECORD_BYTES: usize = LEGACY_RECORD_HEADER_BYTES + MAX_FRAME_BYTES;
+const MAX_CAPTURE_BYTES: usize = LEGACY_HEADER_BYTES + LEGACY_RECORD_HEADER_BYTES + MAX_FRAME_BYTES;
+const MAX_DRIVER_STEPS: usize = 8;
 const INITIAL_STEP_BYTE_BUDGET: u64 = 31;
+const DNS_PORT: u16 = 53;
+const SOURCE_PORT: u16 = 53_000;
+const SOURCE_ADDRESS: [u8; 4] = [192, 0, 2, 1];
+const DESTINATION_ADDRESS: [u8; 4] = [198, 51, 100, 2];
 
 #[derive(Clone, Copy)]
-struct Selector(u8);
-
-impl Selector {
-    fn ipv6(self) -> bool {
-        self.0 & 1 != 0
-    }
-
-    fn vlan(self) -> bool {
-        self.0 & 2 != 0
-    }
-
-    fn pcapng(self) -> bool {
-        self.0 & 4 != 0
-    }
+enum Framing {
+    Udp,
+    TcpExact,
+    TcpTrailing,
+    TcpPartial,
 }
 
-const fn align4(value: usize) -> usize {
-    (value + 3) & !3
+impl Framing {
+    const fn from_selector(selector: u8) -> Self {
+        match selector & 3 {
+            0 => Self::Udp,
+            1 => Self::TcpExact,
+            2 => Self::TcpTrailing,
+            _ => Self::TcpPartial,
+        }
+    }
 }
 
 fn fuzz_limits() -> ImportLimits {
     ImportLimits {
-        max_capture_bytes: MAX_WRAPPED_CAPTURE_BYTES as u64,
-        max_block_bytes: MAX_WRAPPED_BLOCK_BYTES,
+        max_capture_bytes: MAX_CAPTURE_BYTES as u64,
+        max_block_bytes: MAX_RECORD_BYTES as u32,
         max_decoded_items_per_block: 16,
         max_decoded_items_per_step: 16,
         max_packets: 1,
         max_sections: 1,
         max_interfaces: 1,
-        max_diagnostics: 32,
+        max_diagnostics: 1,
         max_layers: DECODER_MAX_LAYERS_PER_PACKET,
         max_layers_per_packet: DECODER_MAX_LAYERS_PER_PACKET,
         max_fields: DECODER_MAX_FIELDS_PER_PACKET,
         max_fields_per_packet: DECODER_MAX_FIELDS_PER_PACKET,
         max_field_children: DECODER_MAX_FIELD_CHILDREN_PER_PACKET,
         max_field_children_per_packet: DECODER_MAX_FIELD_CHILDREN_PER_PACKET,
-        max_string_bytes: 16 * 1024,
+        max_string_bytes: 256 * 1024,
     }
 }
 
@@ -115,22 +116,110 @@ fn bounded_input(data: &[u8]) -> Option<Vec<u8>> {
     (data.len() <= MAX_FUZZ_INPUT_BYTES).then(|| data.to_vec())
 }
 
-fn ethernet_frame(selector: Selector, network_bytes: &[u8]) -> Vec<u8> {
-    let header_bytes = if selector.vlan() {
-        VLAN_HEADER_BYTES
-    } else {
-        ETHERNET_HEADER_BYTES
+fn udp_segment(payload: &[u8]) -> Vec<u8> {
+    let length = UDP_HEADER_BYTES + payload.len();
+    let mut segment = Vec::with_capacity(length);
+    segment.extend(SOURCE_PORT.to_be_bytes());
+    segment.extend(DNS_PORT.to_be_bytes());
+    segment.extend(
+        u16::try_from(length)
+            .expect("bounded UDP length fits u16")
+            .to_be_bytes(),
+    );
+    // A zero checksum is valid for the synthetic IPv4 UDP path and avoids
+    // coupling the DNS fuzz target to checksum mutation.
+    segment.extend(0_u16.to_be_bytes());
+    segment.extend_from_slice(payload);
+    segment
+}
+
+fn tcp_segment(payload: &[u8], framing: Framing) -> Vec<u8> {
+    let exact_length = u16::try_from(payload.len()).expect("bounded DNS length fits u16");
+    let declared_length = match framing {
+        Framing::TcpExact => exact_length,
+        Framing::TcpTrailing => exact_length.saturating_sub(1),
+        Framing::TcpPartial => exact_length.saturating_add(1),
+        Framing::Udp => unreachable!("UDP framing does not produce a TCP segment"),
     };
-    let mut frame = Vec::with_capacity(header_bytes + network_bytes.len());
+    let mut segment = Vec::with_capacity(TCP_HEADER_BYTES + TCP_DNS_LENGTH_BYTES + payload.len());
+    segment.extend(SOURCE_PORT.to_be_bytes());
+    segment.extend(DNS_PORT.to_be_bytes());
+    segment.extend(0x0102_0304_u32.to_be_bytes());
+    segment.extend(0x0506_0708_u32.to_be_bytes());
+    segment.extend([0x50, 0x18]);
+    segment.extend(32_768_u16.to_be_bytes());
+    segment.extend(0_u16.to_be_bytes());
+    segment.extend(0_u16.to_be_bytes());
+    segment.extend(declared_length.to_be_bytes());
+    segment.extend_from_slice(payload);
+
+    let checksum = transport_checksum(6, &segment);
+    segment[16..18].copy_from_slice(&checksum.to_be_bytes());
+    segment
+}
+
+fn ipv4_packet(protocol: u8, transport: &[u8]) -> Vec<u8> {
+    let total_length = IPV4_HEADER_BYTES + transport.len();
+    let mut packet = Vec::with_capacity(total_length);
+    packet.extend([0x45, 0]);
+    packet.extend(
+        u16::try_from(total_length)
+            .expect("bounded IPv4 length fits u16")
+            .to_be_bytes(),
+    );
+    packet.extend(0x1234_u16.to_be_bytes());
+    packet.extend(0_u16.to_be_bytes());
+    packet.extend([64, protocol]);
+    packet.extend(0_u16.to_be_bytes());
+    packet.extend(SOURCE_ADDRESS);
+    packet.extend(DESTINATION_ADDRESS);
+    let checksum = checksum(&[&packet]);
+    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    packet.extend_from_slice(transport);
+    packet
+}
+
+fn transport_checksum(protocol: u8, segment: &[u8]) -> u16 {
+    let protocol_bytes = [0, protocol];
+    let length = u16::try_from(segment.len())
+        .expect("bounded transport length fits u16")
+        .to_be_bytes();
+    checksum(&[
+        &SOURCE_ADDRESS,
+        &DESTINATION_ADDRESS,
+        &protocol_bytes,
+        &length,
+        segment,
+    ])
+}
+
+fn checksum(parts: &[&[u8]]) -> u16 {
+    let mut sum = 0_u64;
+    let mut high = None;
+    for part in parts {
+        for &byte in *part {
+            if let Some(high) = high.take() {
+                sum += u64::from(u16::from_be_bytes([high, byte]));
+            } else {
+                high = Some(byte);
+            }
+        }
+    }
+    if let Some(high) = high {
+        sum += u64::from(u16::from_be_bytes([high, 0]));
+    }
+    while sum > u64::from(u16::MAX) {
+        sum = (sum & u64::from(u16::MAX)) + (sum >> 16);
+    }
+    !u16::try_from(sum).expect("folded checksum fits u16")
+}
+
+fn ethernet_frame(payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(ETHERNET_HEADER_BYTES + payload.len());
     frame.extend([0x02, 0, 0, 0, 0, 1]);
     frame.extend([0x02, 0, 0, 0, 0, 2]);
-    let ether_type = if selector.ipv6() { 0x86dd_u16 } else { 0x0800 };
-    if selector.vlan() {
-        frame.extend(0x8100_u16.to_be_bytes());
-        frame.extend(100_u16.to_be_bytes());
-    }
-    frame.extend(ether_type.to_be_bytes());
-    frame.extend_from_slice(network_bytes);
+    frame.extend(0x0800_u16.to_be_bytes());
+    frame.extend_from_slice(payload);
     frame
 }
 
@@ -153,62 +242,21 @@ fn legacy_pcap(frame: &[u8]) -> Vec<u8> {
     capture
 }
 
-fn pcapng_block(block_type: u32, body: &[u8]) -> Vec<u8> {
-    let block_length = u32::try_from(12 + body.len()).expect("bounded block length fits u32");
-    assert_eq!(block_length % 4, 0);
-    let mut block = Vec::with_capacity(block_length as usize);
-    block.extend(block_type.to_le_bytes());
-    block.extend(block_length.to_le_bytes());
-    block.extend_from_slice(body);
-    block.extend(block_length.to_le_bytes());
-    block
-}
-
-fn pcapng(frame: &[u8]) -> Vec<u8> {
-    let mut section = Vec::with_capacity(16);
-    section.extend(0x1a2b_3c4d_u32.to_le_bytes());
-    section.extend(1_u16.to_le_bytes());
-    section.extend(0_u16.to_le_bytes());
-    section.extend((-1_i64).to_le_bytes());
-
-    let mut interface = Vec::with_capacity(8);
-    interface.extend(1_u16.to_le_bytes());
-    interface.extend(0_u16.to_le_bytes());
-    interface.extend(65_535_u32.to_le_bytes());
-
-    let frame_length = u32::try_from(frame.len()).expect("bounded frame length fits u32");
-    let mut packet = Vec::with_capacity(20 + align4(frame.len()));
-    packet.extend(0_u32.to_le_bytes());
-    packet.extend(0_u32.to_le_bytes());
-    packet.extend(123_u32.to_le_bytes());
-    packet.extend(frame_length.to_le_bytes());
-    packet.extend(frame_length.to_le_bytes());
-    packet.extend_from_slice(frame);
-    packet.resize(20 + align4(frame.len()), 0);
-
-    let mut capture = Vec::with_capacity(
-        PCAPNG_SECTION_BYTES + PCAPNG_INTERFACE_BYTES + PCAPNG_PACKET_OVERHEAD_BYTES + frame.len(),
-    );
-    capture.extend(pcapng_block(0x0a0d_0d0a, &section));
-    capture.extend(pcapng_block(1, &interface));
-    capture.extend(pcapng_block(6, &packet));
-    capture
-}
-
 fn wrapped_capture(input: &[u8]) -> Vec<u8> {
-    let (selector, network_bytes) = input
+    let (selector, dns) = input
         .split_first()
-        .map_or((Selector(0), &[][..]), |(&selector, bytes)| {
-            (Selector(selector & 7), bytes)
-        });
-    assert!(network_bytes.len() <= MAX_NETWORK_BYTES);
-    let frame = ethernet_frame(selector, network_bytes);
-    let capture = if selector.pcapng() {
-        pcapng(&frame)
-    } else {
-        legacy_pcap(&frame)
+        .map_or((0, &[][..]), |(&selector, bytes)| (selector, bytes));
+    assert!(dns.len() <= MAX_DNS_BYTES);
+    let framing = Framing::from_selector(selector);
+    let (protocol, segment) = match framing {
+        Framing::Udp => (17, udp_segment(dns)),
+        Framing::TcpExact | Framing::TcpTrailing | Framing::TcpPartial => {
+            (6, tcp_segment(dns, framing))
+        }
     };
-    assert!(capture.len() <= MAX_WRAPPED_CAPTURE_BYTES);
+    let frame = ethernet_frame(&ipv4_packet(protocol, &segment));
+    let capture = legacy_pcap(&frame);
+    assert!(capture.len() <= MAX_CAPTURE_BYTES);
     capture
 }
 
@@ -230,7 +278,7 @@ fn assert_monotonic(previous: ImportProgress, current: ImportProgress) {
 fn assert_valid_dataset(dataset: &CaptureDataset) {
     dataset
         .validate()
-        .expect("a completed network decode preserves canonical model invariants");
+        .expect("a completed DNS decode preserves canonical model invariants");
     assert_eq!(dataset.metadata().packet_count, 1);
     assert_eq!(dataset.packets().len(), 1);
     assert_eq!(dataset.sections().len(), 1);
@@ -238,6 +286,9 @@ fn assert_valid_dataset(dataset: &CaptureDataset) {
     assert!(dataset.layers().len() <= DECODER_MAX_LAYERS_PER_PACKET as usize);
     assert!(dataset.fields().len() <= DECODER_MAX_FIELDS_PER_PACKET as usize);
     assert!(dataset.field_children().len() <= DECODER_MAX_FIELD_CHILDREN_PER_PACKET as usize);
+    assert!(dataset.diagnostics().len() <= 1);
+    // Every capture-derived DNS string value owns at least one field, while
+    // the remaining strings belong to the decoder's fixed safe vocabulary.
     assert!(
         dataset.interned_string_count()
             <= DECODER_VOCABULARY_COUNT_UPPER_BOUND as usize + dataset.fields().len()
@@ -295,7 +346,7 @@ fn exercise_to_terminal(bytes: Vec<u8>) {
     for _ in 0..MAX_DRIVER_STEPS {
         let outcome = importer
             .step(1, byte_budget)
-            .expect("the bounded network decoder handles every packet byte sequence");
+            .expect("the bounded DNS decoder handles every message byte sequence");
         match outcome {
             ImportStep::NeedsBudget {
                 progress,
@@ -325,14 +376,14 @@ fn exercise_to_terminal(bytes: Vec<u8>) {
                 );
                 let dataset = importer
                     .finish()
-                    .expect("a ready network import finalizes into a valid dataset");
+                    .expect("a ready DNS import finalizes into a valid dataset");
                 assert_valid_dataset(&dataset);
                 return;
             }
         }
     }
 
-    panic!("bounded network importer did not reach a terminal result");
+    panic!("bounded DNS importer did not reach a terminal result");
 }
 
 fuzz_target!(|data: &[u8]| {

@@ -44,25 +44,58 @@ address evidence for checksum validation.
 
 Dispatch is family-specific: protocol `1` means ICMP only in IPv4 and selector `58` means ICMPv6
 only in IPv6. TCP and UDP are accepted for either family. Numeric selectors outside this set remain
-uninterpreted; a decoder is never guessed from payload shape or port numbers. DNS remains deferred
-to its dedicated Epic 3 issue.
+uninterpreted; a transport decoder is never guessed from payload shape. The only application
+dispatch in this version is classic DNS on source or destination port `53`.
 
 Non-initial fragments never reach a transport decoder. A first fragment may expose a transport
 header that is present in that fragment, but it does not produce a complete application-payload
 handoff or checksum verdict. IPv6 atomic fragments are complete checksum domains. No fragment
-reassembly, TCP stream reassembly, congestion-state inference, application decoding, or
-conversation-state conclusion is performed here.
+reassembly, TCP stream reassembly, congestion-state inference, or conversation-state conclusion is
+performed here.
+
+### Application protocol
+
+| Input | Decoded facts | Current boundary |
+| --- | --- | --- |
+| DNS over UDP port `53` | Identifier, flags, query/response state, opcode, four-bit header response code (base RCODE), section counts, questions, and answer/authority/additional records | The complete length-bounded UDP application payload is exactly one DNS message |
+| DNS over TCP port `53` | The same DNS message fields plus validation of the two-byte message-length prefix | Exactly one segment-local length-prefixed message must consume the complete captured TCP payload; no stream reassembly, partial frame, trailing frame, or pipelined-message support |
+| Internet-class DNS A, AAAA, NS, CNAME, SOA, PTR, MX, and TXT RRs | Common owner/type/class/TTL/RDLENGTH fields plus bounded type-specific RDATA | Unknown types and non-Internet classes remain one borrowed RDATA range and are never interpreted from their contents |
+
+OPT records remain opaque unknown-record RDATA in this version, so EDNS extended response codes are
+not combined with the four-bit DNS-header RCODE.
+
+All four DNS section counts are exposed. The decoder supports multiple questions and traverses
+records from the answer, authority, and additional sections in wire order. Work is bounded before
+attacker-controlled count loops:
+
+- at most 16 questions;
+- at most 16 resource records total across answer, authority, and additional sections;
+- at most 64 decoded name occurrences per message;
+- at most 16 compression-pointer hops per name; and
+- at most 16 TXT character strings total per message.
+
+DNS labels remain limited to 63 bytes and an expanded wire-format name to 255 bytes. A compression
+pointer must stay inside the DNS message and point strictly backward to a previously validated name
+boundary. The decoder separately tracks encoded consumption and expanded traversal, preventing
+self references, forward references, cycles, pointer-into-label ambiguity, and out-of-bounds reads.
+The pointer base is the DNS header's ID octet, not the preceding TCP length field.
+
+Expanded names are retained as case-preserving escaped interned strings so a compressed name can
+have one exact encoded evidence range. This is a bounded derived copy: name occurrences and output
+length are capped, strings remain subject to the capture-wide interner byte budget, and neither
+names nor other payload-derived text enter diagnostics or logs. Raw RDATA and all other byte-valued
+fields continue to borrow ranges from the single immutable capture allocation.
 
 ## Evidence and recovery rules
 
 - Every layer and decoded field refers to a checked half-open range in the original capture.
-- Address values retain byte references; packet bytes are not copied into strings or secondary
-  payload buffers.
+- Address and raw RDATA values retain byte references; packet bytes are not copied into secondary
+  payload buffers. Only bounded, escaped DNS names are interned as derived display values.
 - Truncated or contradictory headers produce structured packet diagnostics and stop only the
   affected protocol path. Capture framing remains available.
-- A network-through-transport path emits at most one prioritized diagnostic. Actionable length, structure, and
-  truncation conditions outrank checksum caveats so hostile packets cannot exhaust the diagnostic
-  arena with one warning per failed check.
+- A network-through-transport-or-DNS path emits at most one prioritized diagnostic. Actionable
+  length, structure, truncation, and resource-limit conditions outrank checksum caveats so hostile
+  packets cannot exhaust the diagnostic arena with one warning per failed check.
 - IPv4 header checksum validity is evidence metadata, not a certainty claim. An invalid value emits
   a warning that explicitly notes capture offload as a possible explanation.
 - TCP, UDP, ICMP, and ICMPv6 checksum validity is emitted only when the complete captured checksum
@@ -71,13 +104,20 @@ conversation-state conclusion is performed here.
   IPv4 source-route options and traversed IPv6 Routing headers make the effective destination
   ambiguous, so WireLens deliberately omits a checksum verdict instead of presenting false
   certainty. Invalid transport checksum warnings also name capture offload as a possible cause.
+- DNS decoding is independent from the transport checksum verdict: a complete port-53 payload may
+  still be decoded when checksum metadata is invalid because capture offload can explain the
+  observed checksum. UDP-internal and exact TCP-frame length contradictions, malformed DNS names,
+  and malformed RDATA stop only the DNS path. Non-exact TCP framing is left uninterpreted rather
+  than mislabeled as capture truncation because normal TCP segmentation cannot be resolved without
+  stream state.
 - Reaching an IPv6 traversal cap emits a visible unsupported-chain marker and a resource-limit
   warning. ESP is visible but terminal because its protected remainder, trailer, and Next Header
   semantics depend on security-association state that is outside the decoder.
 - Unsupported link types remain visible in interface metadata without invented packet-byte evidence.
   Unknown EtherTypes remain visible in the exact Ethernet type field and their payload is left
   uninterpreted. IEEE 802.3 length framing, provider tags, and stacked VLAN tags produce bounded
-  unsupported encapsulation facts. WireLens does not guess a protocol from payload shape or ports.
+  unsupported encapsulation facts. WireLens does not guess a protocol from payload shape; its only
+  application-layer selector is the bounded TCP/UDP port-53 DNS path described above.
 - Arena growth is limited both per packet and per dataset. The browser/Wasm caps and their admission
   accounting are recorded in [ADR-0007](architecture/adr-0007-wasm-boundary-contract.md). The
   fixed small-capture allowance covers 1,024 copies of each current decoder-wide componentwise
@@ -94,5 +134,8 @@ directional benchmark. The committed corpora are generated test data under the r
 their construction and hashes are documented in the
 [link decoder fixture manifest](../fixtures/manifests/protocol-decode-fuzz-corpus.md) and focused
 [network/transport decoder fixture manifest](../fixtures/manifests/network-decode-fuzz-corpus.md).
+DNS compression, count, RDLENGTH, unknown-record, and TCP-framing seeds are documented separately in
+the [DNS decoder fixture manifest](../fixtures/manifests/dns-decode-fuzz-corpus.md). The directional
+DNS benchmark compares generated port-53 full-packet decoding against a framing-only baseline.
 
 No private, proprietary, or captured network traffic is accepted as a test fixture.

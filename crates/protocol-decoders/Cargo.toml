@@ -27,3 +27,7 @@ harness = false
 [[bench]]
 name = "transport_layer_decode"
 harness = false
+
+[[bench]]
+name = "dns_message_decode"
+harness = false

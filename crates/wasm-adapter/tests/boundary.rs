@@ -680,33 +680,59 @@ fn import_registry_cap_is_enforced_before_constructing_another_importer() {
     let capture = synthetic_pcap(&[]);
     let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
     let mut state = BoundaryState::new();
-    let one_import = state
+    let default_admission = state
         .admit_import_input(capture_length)
         .expect("one tiny capture fits the decoder-wide arena reservations");
     assert_eq!(
-        one_import.limits().max_layers,
+        default_admission.limits().max_layers,
         CAPTURE_DECODED_LAYER_BASE_ALLOWANCE
     );
     assert_eq!(
-        one_import.limits().max_fields,
+        default_admission.limits().max_fields,
         CAPTURE_DECODED_FIELD_BASE_ALLOWANCE
     );
     assert_eq!(
-        one_import.limits().max_field_children,
+        default_admission.limits().max_field_children,
         CAPTURE_FIELD_CHILD_BASE_ALLOWANCE
     );
-    assert!(one_import.resulting_logical_bytes_upper_bound() <= MAX_TOTAL_LOGICAL_BYTES);
-    let mut imports = Vec::new();
-    for _ in 0..MAX_IMPORT_HANDLES {
+    assert!(default_admission.resulting_logical_bytes_upper_bound() <= MAX_TOTAL_LOGICAL_BYTES);
+
+    // Default imports reserve the complete 1,024-packet decoder baseline and
+    // may therefore reach the cumulative logical-memory envelope before the
+    // independent handle cap. Minimal explicit limits isolate registry
+    // capacity without weakening production admission accounting.
+    let registry_probe_limits = ImportLimits {
+        max_packets: 1,
+        max_sections: 1,
+        max_interfaces: 1,
+        max_diagnostics: 1,
+        max_layers: 1,
+        max_layers_per_packet: 1,
+        max_fields: 1,
+        max_fields_per_packet: 1,
+        max_field_children: 1,
+        max_field_children_per_packet: 1,
+        max_string_bytes: 1_024,
+        ..ImportLimits::default()
+    };
+    let first = state
+        .begin_import_with_limits(capture.clone(), registry_probe_limits)
+        .expect("one minimally reserved importer fits");
+    let one_import_logical_bytes = state
+        .resource_stats()
+        .expect("one importer has exact stats")
+        .total_logical_bytes_upper_bound;
+    let mut imports = vec![first];
+    for _ in 1..MAX_IMPORT_HANDLES {
         imports.push(
             state
-                .begin_import(capture.clone())
+                .begin_import_with_limits(capture.clone(), registry_probe_limits)
                 .expect("bounded import registry has capacity"),
         );
     }
     assert_eq!(
         state
-            .begin_import(capture)
+            .begin_import_with_limits(capture, registry_probe_limits)
             .expect_err("one importer beyond the cap is rejected")
             .code(),
         BoundaryErrorCode::REGISTRY_LIMIT
@@ -721,8 +747,7 @@ fn import_registry_cap_is_enforced_before_constructing_another_importer() {
     assert!(snapshot.total_logical_bytes_upper_bound <= MAX_TOTAL_LOGICAL_BYTES);
     assert_eq!(
         snapshot.total_logical_bytes_upper_bound,
-        one_import.resulting_logical_bytes_upper_bound()
-            * u64::try_from(MAX_IMPORT_HANDLES).expect("handle cap fits u64")
+        one_import_logical_bytes * u64::try_from(MAX_IMPORT_HANDLES).expect("handle cap fits u64")
     );
     assert_eq!(
         snapshot.total_logical_bytes_upper_bound,

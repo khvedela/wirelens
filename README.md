@@ -42,7 +42,7 @@ Packet data can contain credentials, identifiers, private conversations, and pro
 - A versioned, generational-handle Wasm API with cooperative cancellation, monotonic progress, deterministic cleanup, structured warnings/errors, and bounded binary packet batches.
 - A production module-worker harness that blocks external traffic and verifies detached binary transfers in Chromium and Firefox CI.
 - An accessible React file picker and drag-and-drop importer that validates capture magic, reads and parses only in a module worker, reports separate read/parse progress, cancels cooperatively, and retains no raw capture in browser storage.
-- Platform-neutral, bounded [Ethernet II, single-tag IEEE 802.1Q, ARP, IPv4, IPv6, TCP, UDP, ICMP, and ICMPv6 decoding](docs/protocol-decoding.md) with exact field-to-byte evidence, bounded option/extension traversal, fragment metadata, checksum caveats, and structured recovery.
+- Platform-neutral, bounded [Ethernet II, single-tag IEEE 802.1Q, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, and port-53 DNS decoding](docs/protocol-decoding.md) with exact field-to-byte evidence, bounded option, extension, DNS-record, and compressed-name traversal, fragment metadata, checksum caveats, and structured recovery.
 
 ## Accepted v0.1 architecture
 

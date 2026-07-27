@@ -14,6 +14,7 @@ const IPV4_SOURCE: [u8; 4] = [192, 0, 2, 1];
 const IPV4_DESTINATION: [u8; 4] = [198, 51, 100, 9];
 const IPV6_SOURCE: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
 const IPV6_DESTINATION: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
+const TEST_DESTINATION_PORT: u16 = 9;
 
 fn legacy_capture(packet: &[u8]) -> Vec<u8> {
     let packet_length = u32::try_from(packet.len()).expect("synthetic packet length fits u32");
@@ -146,7 +147,7 @@ fn ipv6(payload: &[u8], declared_payload_length: Option<usize>, next_header: u8)
 fn udp(payload: &[u8], declared_length: u16, checksum_value: u16) -> Vec<u8> {
     let mut datagram = Vec::with_capacity(8 + payload.len());
     datagram.extend(53_000_u16.to_be_bytes());
-    datagram.extend(53_u16.to_be_bytes());
+    datagram.extend(TEST_DESTINATION_PORT.to_be_bytes());
     datagram.extend(declared_length.to_be_bytes());
     datagram.extend(checksum_value.to_be_bytes());
     datagram.extend(payload);
@@ -292,7 +293,7 @@ fn decodes_ipv4_udp_and_limits_checksum_to_the_udp_length() {
     );
     assert_eq!(
         one_field(&dataset, "destination_port").value,
-        FieldValue::Unsigned(53)
+        FieldValue::Unsigned(u64::from(TEST_DESTINATION_PORT))
     );
     assert_eq!(
         one_field(&dataset, "length").value,
