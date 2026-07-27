@@ -152,7 +152,7 @@ jobs:
 
       - name: Replay each committed synthetic seed once
         run: |
-          for target in capture_import protocol_decode network_decode; do
+          for target in capture_import protocol_decode network_decode dns_decode; do
             for seed in "fuzz/corpus/$target"/*; do
               test -f "$seed"
               cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "$seed" -- -runs=1 -timeout=2 -rss_limit_mb=1024
@@ -181,9 +181,9 @@ jobs:
 
       - name: Run bounded scheduled campaign
         run: |
-          for target in capture_import protocol_decode network_decode; do
+          for target in capture_import protocol_decode network_decode dns_decode; do
             max_len=4096
-            if [ "$target" = network_decode ]; then
+            if [ "$target" = network_decode ] || [ "$target" = dns_decode ]; then
               max_len=4097
             fi
             cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "fuzz/corpus/$target" -- \

@@ -156,7 +156,7 @@ pub enum ImportLimitKind {
     FieldChildren,
     /// Field-child references for one packet.
     FieldChildrenPerPacket,
-    /// Interned safe text.
+    /// Interned protocol vocabulary and bounded escaped field text.
     StringBytes,
 }
 

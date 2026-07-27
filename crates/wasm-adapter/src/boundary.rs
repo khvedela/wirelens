@@ -10,6 +10,7 @@ use packet_core::{
 use protocol_decoders::{
     DECODER_MAX_FIELD_CHILDREN_PER_PACKET, DECODER_MAX_FIELDS_PER_PACKET,
     DECODER_MAX_LAYERS_PER_PACKET, DECODER_VOCABULARY_COUNT_UPPER_BOUND, LinkLayerDecoder,
+    MAX_DNS_NAMES_PER_PACKET,
 };
 
 use crate::{
@@ -1639,13 +1640,22 @@ fn parser_buffer_bytes_for_capture(
 
 fn import_auxiliary_bytes_upper_bound(limits: ImportLimits) -> Result<u64, BoundaryError> {
     // The importer can intern at most one interface name per interface, one
-    // safe message per diagnostic, and the decoder's fixed safe vocabulary.
+    // safe message per diagnostic, the decoder's fixed safe vocabulary, and
+    // one non-empty bounded presentation value for each decoded DNS name.
+    // DNS name values are also bounded by the field and string-byte totals,
+    // so admission reserves the smallest of those independent ceilings.
     // packet-core's fixed-width arena vectors grow geometrically only up to
     // their configured total, so one capped arena is sufficient here. The
     // string finalization allocations remain accounted separately below.
+    let dynamic_decoder_strings = u64::from(limits.max_packets)
+        .checked_mul(u64::from(MAX_DNS_NAMES_PER_PACKET))
+        .ok_or_else(arithmetic_error)?
+        .min(u64::from(limits.max_fields))
+        .min(u64::from(limits.max_string_bytes));
     let string_count = u64::from(limits.max_interfaces)
         .checked_add(u64::from(limits.max_diagnostics))
         .and_then(|count| count.checked_add(u64::from(DECODER_VOCABULARY_COUNT_UPPER_BOUND)))
+        .and_then(|count| count.checked_add(dynamic_decoder_strings))
         .ok_or_else(arithmetic_error)?;
     let tree_pointer_reservation = type_bytes::<usize>()?
         .checked_mul(4)
@@ -1902,17 +1912,19 @@ mod tests {
         BoundaryState, CAPTURE_BYTES_PER_DECODED_FIELD, CAPTURE_BYTES_PER_DECODED_LAYER,
         CAPTURE_BYTES_PER_FIELD_CHILD, CAPTURE_DECODED_FIELD_BASE_ALLOWANCE,
         CAPTURE_DECODED_LAYER_BASE_ALLOWANCE, CAPTURE_FIELD_CHILD_BASE_ALLOWANCE, DisposeStatus,
-        ImportAdvance, Registry, allocate_import_copy_buffer, import_auxiliary_bytes_upper_bound,
-        packet_index_bytes_for_limit, parser_buffer_bytes_for_capture, proportional_decode_limit,
-        resulting_dataset_logical_bytes, resulting_import_logical_bytes,
+        ImportAdvance, Registry, allocate_import_copy_buffer, arithmetic_error,
+        import_auxiliary_bytes_upper_bound, packet_index_bytes_for_limit,
+        parser_buffer_bytes_for_capture, proportional_decode_limit,
+        resulting_dataset_logical_bytes, resulting_import_logical_bytes, type_bytes,
     };
     use crate::{
         BoundaryErrorCode, HandleKind, ImportLimits, MAX_CAPTURE_BYTES, MAX_IMPORT_STEP_BYTES,
         MAX_IMPORT_STEP_RECORDS, MAX_TOTAL_LOGICAL_BYTES, handle::MAX_GENERATION,
     };
+    use packet_core::StringId;
     use protocol_decoders::{
         DECODER_MAX_FIELD_CHILDREN_PER_PACKET, DECODER_MAX_FIELDS_PER_PACKET,
-        DECODER_MAX_LAYERS_PER_PACKET,
+        DECODER_MAX_LAYERS_PER_PACKET, MAX_DNS_NAMES_PER_PACKET,
     };
 
     fn vlan_header(inner_ether_type: u16) -> Vec<u8> {
@@ -1938,14 +1950,62 @@ mod tests {
         !u16::try_from(sum).expect("folded checksum fits u16")
     }
 
+    fn maximum_dns_message() -> Vec<u8> {
+        let mut message = Vec::new();
+        message.extend(0x1234_u16.to_be_bytes());
+        message.extend(0x8180_u16.to_be_bytes());
+        message.extend(16_u16.to_be_bytes());
+        message.extend(16_u16.to_be_bytes());
+        message.extend(0_u16.to_be_bytes());
+        message.extend(0_u16.to_be_bytes());
+        for _ in 0..16 {
+            message.push(0);
+            message.extend(1_u16.to_be_bytes());
+            message.extend(1_u16.to_be_bytes());
+        }
+        for _ in 0..15 {
+            message.push(0);
+            message.extend(6_u16.to_be_bytes());
+            message.extend(1_u16.to_be_bytes());
+            message.extend(300_u32.to_be_bytes());
+            message.extend(22_u16.to_be_bytes());
+            message.extend([0, 0]);
+            for value in [1_u32, 2, 3, 4, 5] {
+                message.extend(value.to_be_bytes());
+            }
+        }
+        message.push(0);
+        message.extend(16_u16.to_be_bytes());
+        message.extend(1_u16.to_be_bytes());
+        message.extend(300_u32.to_be_bytes());
+        message.extend(16_u16.to_be_bytes());
+        message.extend([0_u8; 16]);
+        message
+    }
+
     fn maximal_ipv4_field_decode() -> Vec<u8> {
         const IPV4_HEADER_LENGTH: usize = 60;
         const TCP_HEADER_LENGTH: usize = 60;
 
+        let dns = maximum_dns_message();
+        let mut tcp_payload = Vec::with_capacity(2 + dns.len());
+        tcp_payload.extend(
+            u16::try_from(dns.len())
+                .expect("DNS message length fits u16")
+                .to_be_bytes(),
+        );
+        tcp_payload.extend(dns);
+        let tcp_length = TCP_HEADER_LENGTH + tcp_payload.len();
+        let ipv4_length = IPV4_HEADER_LENGTH + tcp_length;
+
         let mut frame = vlan_header(0x0800);
         let ipv4_start = frame.len();
         frame.extend([0x4f, 0x00]);
-        frame.extend(120_u16.to_be_bytes());
+        frame.extend(
+            u16::try_from(ipv4_length)
+                .expect("IPv4 packet length fits u16")
+                .to_be_bytes(),
+        );
         frame.extend(0x1234_u16.to_be_bytes());
         frame.extend(0_u16.to_be_bytes());
         frame.extend([64, 6]);
@@ -1967,7 +2027,7 @@ mod tests {
 
         let tcp_start = frame.len();
         frame.extend(12_345_u16.to_be_bytes());
-        frame.extend(443_u16.to_be_bytes());
+        frame.extend(53_u16.to_be_bytes());
         frame.extend(0x0102_0304_u32.to_be_bytes());
         frame.extend(0x0506_0708_u32.to_be_bytes());
         frame.extend([0xf0, 0xff]);
@@ -1979,7 +2039,8 @@ mod tests {
             // within TCP's 40-byte data-offset-bounded option area.
             frame.extend([0x1e, 2]);
         }
-        assert_eq!(frame.len(), tcp_start + TCP_HEADER_LENGTH);
+        frame.extend(tcp_payload);
+        assert_eq!(frame.len(), tcp_start + tcp_length);
         let tcp_checksum = ipv4_transport_checksum(
             &frame[ipv4_start + 12..ipv4_start + 16],
             &frame[ipv4_start + 16..ipv4_start + 20],
@@ -2024,18 +2085,68 @@ mod tests {
         !u16::try_from(sum).expect("folded checksum fits u16")
     }
 
+    fn ipv6_transport_checksum(
+        source: &[u8],
+        destination: &[u8],
+        next_header: u8,
+        message: &[u8],
+    ) -> u16 {
+        let length = u32::try_from(message.len())
+            .expect("synthetic transport message length fits u32")
+            .to_be_bytes();
+        let next_header = [0, 0, 0, next_header];
+        let mut sum = 0_u32;
+        for bytes in [source, destination, &length, &next_header, message] {
+            for pair in bytes.chunks_exact(2) {
+                sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+            }
+            if let Some(&last) = bytes.chunks_exact(2).remainder().first() {
+                sum += u32::from(last) << 8;
+            }
+        }
+        while sum > u32::from(u16::MAX) {
+            sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+        }
+        !u16::try_from(sum).expect("folded checksum fits u16")
+    }
+
     fn maximal_ipv6_layer_decode() -> Vec<u8> {
+        const EXTENSION_BYTES: usize = 8 * 8;
+        const UDP_HEADER_LENGTH: usize = 8;
+        let dns = [0x12, 0x34, 0x81, 0x80, 0, 0, 0, 0, 0, 0, 0, 0];
+        let udp_length = UDP_HEADER_LENGTH + dns.len();
+        let payload_length = EXTENSION_BYTES + udp_length;
+        let source = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let destination = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+
         let mut frame = vlan_header(0x86dd);
         frame.extend(0x6000_0000_u32.to_be_bytes());
-        frame.extend(72_u16.to_be_bytes());
+        frame.extend(
+            u16::try_from(payload_length)
+                .expect("IPv6 payload length fits u16")
+                .to_be_bytes(),
+        );
         frame.extend([60, 64]);
-        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        frame.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-        for extension_index in 0..9 {
-            let next_header = if extension_index < 8 { 60 } else { 253 };
+        frame.extend(source);
+        frame.extend(destination);
+        for extension_index in 0..8 {
+            let next_header = if extension_index < 7 { 60 } else { 17 };
             frame.extend([next_header, 0, 0, 0, 0, 0, 0, 0]);
         }
-        assert_eq!(frame.len(), 18 + 40 + 72);
+
+        let udp_start = frame.len();
+        frame.extend(12_345_u16.to_be_bytes());
+        frame.extend(53_u16.to_be_bytes());
+        frame.extend(
+            u16::try_from(udp_length)
+                .expect("UDP datagram length fits u16")
+                .to_be_bytes(),
+        );
+        frame.extend(0_u16.to_be_bytes());
+        frame.extend(dns);
+        let checksum = ipv6_transport_checksum(&source, &destination, 17, &frame[udp_start..]);
+        frame[udp_start + 6..udp_start + 8].copy_from_slice(&checksum.to_be_bytes());
+        assert_eq!(frame.len(), 18 + 40 + payload_length);
         frame
     }
 
@@ -2292,7 +2403,7 @@ mod tests {
 
         let import = state
             .begin_import(capture)
-            .expect("the synthetic VLAN/IPv4 capture begins importing");
+            .expect("the synthetic VLAN/IPv4/TCP/DNS capture begins importing");
         loop {
             match state
                 .advance_import(import, MAX_IMPORT_STEP_RECORDS, MAX_IMPORT_STEP_BYTES)
@@ -2322,7 +2433,7 @@ mod tests {
         let children_per_packet =
             usize::try_from(DECODER_MAX_FIELD_CHILDREN_PER_PACKET).expect("child count fits usize");
         assert_eq!(dataset.packets().len(), packet_count);
-        assert_eq!(dataset.layers().len(), packet_count * 4);
+        assert_eq!(dataset.layers().len(), packet_count * 5);
         assert_eq!(dataset.fields().len(), packet_count * fields_per_packet);
         assert_eq!(
             dataset.field_children().len(),
@@ -2333,7 +2444,7 @@ mod tests {
             dataset
                 .packets()
                 .iter()
-                .all(|packet| packet.layers.length() == 4)
+                .all(|packet| packet.layers.length() == 5)
         );
     }
 
@@ -2363,7 +2474,7 @@ mod tests {
                 ImportAdvance::Progress(_) => {}
                 ImportAdvance::Ready(progress) => {
                     assert_eq!(progress.packets_retained, u64::from(PACKETS));
-                    assert_eq!(progress.diagnostics, PACKETS);
+                    assert_eq!(progress.diagnostics, 0);
                     break;
                 }
                 ImportAdvance::NeedsBudget { .. } => {
@@ -2389,13 +2500,7 @@ mod tests {
         assert_eq!(dataset.layers().len(), packet_count * layers_per_packet);
         assert!(dataset.fields().len() <= packet_count * fields_per_packet);
         assert!(dataset.field_children().len() <= packet_count * children_per_packet);
-        assert_eq!(dataset.diagnostics().len(), packet_count);
-        assert!(
-            dataset
-                .diagnostics()
-                .iter()
-                .all(|diagnostic| diagnostic.code == packet_core::DiagnosticCode::RESOURCE_LIMIT)
-        );
+        assert!(dataset.diagnostics().is_empty());
         assert!(
             dataset
                 .packets()
@@ -2440,10 +2545,9 @@ mod tests {
     fn packet_beyond_the_layer_max_baseline_fails_closed_and_reclaims_import() {
         const PACKETS: u32 = 1_025;
 
-        // The real 12-layer IPv6 limit-marker path necessarily emits one
-        // diagnostic per packet and is covered above. This accounting decoder
-        // isolates layer exhaustion so the independent layer base can be
-        // tested past 1,024 packets without first reaching the diagnostic cap.
+        // The real 13-layer IPv6-extension/UDP/DNS path is covered above. This
+        // accounting decoder isolates layer exhaustion so the independent
+        // layer base can be tested past 1,024 packets with a tiny capture.
         let capture = repeated_legacy_pcap(&[0], PACKETS);
         let capture_length = u64::try_from(capture.len()).expect("capture length fits u64");
         let mut state = BoundaryState::new();
@@ -2525,6 +2629,48 @@ mod tests {
         assert_eq!(
             dataset_error.resource_limit(),
             Some(MAX_TOTAL_LOGICAL_BYTES)
+        );
+    }
+
+    #[test]
+    fn auxiliary_reservation_accounts_for_bounded_dynamic_dns_names() {
+        let one_packet = ImportLimits {
+            max_packets: 1,
+            max_fields: 1_000,
+            max_string_bytes: 1_000,
+            ..ImportLimits::default()
+        };
+        let two_packets = ImportLimits {
+            max_packets: 2,
+            ..one_packet
+        };
+
+        let one_packet_bytes = import_auxiliary_bytes_upper_bound(one_packet)
+            .expect("one packet's DNS name slots are representable");
+        let two_packet_bytes = import_auxiliary_bytes_upper_bound(two_packets)
+            .expect("two packets' DNS name slots are representable");
+        let per_string_slot = type_bytes::<Box<str>>()
+            .and_then(|bytes| {
+                bytes
+                    .checked_add(type_bytes::<StringId>()?)
+                    .ok_or_else(arithmetic_error)
+            })
+            .and_then(|bytes| {
+                type_bytes::<usize>()?
+                    .checked_mul(4)
+                    .and_then(|tree| bytes.checked_add(tree))
+                    .ok_or_else(arithmetic_error)
+            })
+            .and_then(|bytes| {
+                type_bytes::<Option<Box<str>>>()?
+                    .checked_mul(2)
+                    .and_then(|finalization| bytes.checked_add(finalization))
+                    .ok_or_else(arithmetic_error)
+            })
+            .expect("one dynamic string slot is representable");
+        assert_eq!(
+            two_packet_bytes - one_packet_bytes,
+            u64::from(MAX_DNS_NAMES_PER_PACKET) * per_string_slot
         );
     }
 

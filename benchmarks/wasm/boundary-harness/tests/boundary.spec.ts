@@ -85,11 +85,11 @@ test("loads the versioned boundary in a production module worker without externa
   expect(metadata.capabilities).toMatchObject({
     decodedArenaAdmissionRule:
       "min(requestedTotal, globalTotal, max(arenaBase, ceil(captureBytes / admissionBytesPerItem)))",
-    decodedFieldAdmissionBase: 173 * 1_024,
+    decodedFieldAdmissionBase: 487 * 1_024,
     decodedFieldAdmissionBytesPerItem: 63,
-    decodedLayerAdmissionBase: 12 * 1_024,
+    decodedLayerAdmissionBase: 13 * 1_024,
     decodedLayerAdmissionBytesPerItem: 250,
-    fieldChildAdmissionBase: 169 * 1_024,
+    fieldChildAdmissionBase: 482 * 1_024,
     fieldChildAdmissionBytesPerItem: 84,
     maxBlockBytes: 4 * 1024 * 1024,
     maxCaptureBytes: 256 * 1024 * 1024,

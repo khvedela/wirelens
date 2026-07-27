@@ -4,12 +4,13 @@
 //! arena facts with absolute evidence ranges. They do not depend on a browser,
 //! WebAssembly, or UI framework. The link-layer decoder intentionally supports
 //! Ethernet II, one customer 802.1Q tag, and Ethernet/IPv4 ARP. It also decodes
-//! bounded IPv4, IPv6, TCP, UDP, ICMP, and `ICMPv6` headers. Application payloads
-//! remain borrowed and uninterpreted at the transport handoff.
+//! bounded IPv4, IPv6, TCP, UDP, ICMP, and `ICMPv6` headers plus bounded
+//! classic DNS messages carried on port 53.
 
 #![forbid(unsafe_code)]
 
 mod checksum;
+mod dns;
 mod icmp;
 mod ipv4;
 mod ipv6;
@@ -64,12 +65,24 @@ pub const LINK_LAYER_MAX_FIELDS_PER_PACKET: u32 = 25;
 pub const LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 21;
 
 /// Maximum protocol layers emitted by any current decoder path per packet.
-pub const DECODER_MAX_LAYERS_PER_PACKET: u32 = 12;
+///
+/// The reachable maximum is Ethernet, one VLAN tag, IPv6, eight extension
+/// headers, UDP, and DNS.
+pub const DECODER_MAX_LAYERS_PER_PACKET: u32 = 13;
 /// Maximum decoded fields emitted by any current decoder path per packet.
-pub const DECODER_MAX_FIELDS_PER_PACKET: u32 = 173;
+///
+/// The reachable maximum combines the VLAN/IPv4/TCP maximum-option path with
+/// a bounded DNS tree containing 16 questions, 15 SOA records, and one TXT
+/// record containing all 16 permitted strings.
+pub const DECODER_MAX_FIELDS_PER_PACKET: u32 = 487;
 /// Maximum field-child references emitted by any current decoder path per packet.
-pub const DECODER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 169;
-/// Conservative ceiling for the complete decoder vocabulary.
+pub const DECODER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 482;
+/// Conservative ceiling for the complete decoder's fixed safe vocabulary.
+///
+/// A source audit after adding DNS found 219 distinct internable protocol,
+/// field, root, and diagnostic strings. Bounded rendered DNS names are
+/// accounted separately at the importer boundary. The remaining 37 slots
+/// preserve explicit headroom for compatible vocabulary additions.
 pub const DECODER_VOCABULARY_COUNT_UPPER_BOUND: u32 = 256;
 /// Maximum number of IPv4 option items decoded from the IHL-bounded header.
 pub const MAX_IPV4_OPTION_ITEMS: u32 = 40;
@@ -81,6 +94,8 @@ pub const MAX_IPV6_EXTENSION_BYTES: u32 = 512;
 pub const MAX_TCP_OPTION_ITEMS: u32 = 40;
 /// Maximum TCP option bytes permitted by the four-bit TCP data offset.
 pub const MAX_TCP_OPTION_BYTES: u32 = 40;
+/// Maximum decoded DNS name occurrences retained from one packet.
+pub use dns::MAX_DNS_NAMES_PER_PACKET;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkVersion {
@@ -357,7 +372,8 @@ fn dispatch_network_decode(
         if let Some(transport) = transport {
             record_finding(&mut finding, transport.finding);
             if let Some(payload) = transport.payload {
-                dispatch_transport_payload(input, payload);
+                let application_finding = dispatch_transport_payload(input, sink, payload)?;
+                record_finding(&mut finding, application_finding);
             }
         }
     }
@@ -392,19 +408,41 @@ fn dispatch_network_payload(
     }
 }
 
-fn dispatch_transport_payload(input: PacketDecodeInput<'_>, payload: TransportPayload) {
+fn dispatch_transport_payload(
+    input: PacketDecodeInput<'_>,
+    sink: &mut PacketDecodeSink<'_>,
+    payload: TransportPayload,
+) -> Result<Option<ProtocolFinding>, ImportError> {
     debug_assert!(payload.payload_range.start() >= input.data_range().start());
     debug_assert!(payload.payload_range.end() <= input.data_range().end());
     debug_assert!(u64::from(payload.payload_range.length()) <= u64::from(payload.declared_length));
 
-    // This is the single bounded transport-to-application handoff. Issue #15
-    // attaches DNS framing here; until then the exact ports and borrowed
-    // payload evidence remain uninterpreted.
-    let _ = (
-        payload.protocol,
-        payload.source_port,
-        payload.destination_port,
-    );
+    if payload.source_port != 53 && payload.destination_port != 53 {
+        return Ok(None);
+    }
+    let message_range = match payload.protocol {
+        TransportProtocol::Udp => payload.payload_range,
+        TransportProtocol::Tcp => {
+            let bytes = packet_slice(input, payload.payload_range)?;
+            let Some(declared) = read_u16(bytes, 0).map(usize::from) else {
+                return Ok(None);
+            };
+            let Some(actual) = bytes.len().checked_sub(2) else {
+                return Ok(None);
+            };
+            if declared != actual {
+                return Ok(None);
+            }
+            payload
+                .payload_range
+                .child(
+                    2,
+                    u32::try_from(actual).map_err(|_| ImportError::Arithmetic)?,
+                )
+                .ok_or(ImportError::Arithmetic)?
+        }
+    };
+    dns::decode(input, sink, message_range)
 }
 
 fn decode_vlan(
