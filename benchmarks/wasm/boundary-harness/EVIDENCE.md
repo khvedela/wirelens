@@ -1,6 +1,6 @@
 # Wasm boundary evidence
 
-Recorded 2026-07-26T23:28:52.522Z in chromium. The browser reported `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/150.0.0.0 Safari/537.36` and 11 logical processors. Fixtures are deterministic, generated in memory, and contain no captured private traffic.
+Recorded 2026-07-27T00:22:21.645Z in chromium. The browser reported `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36` and 11 logical processors. Fixtures are deterministic, generated in memory, and contain no captured private traffic.
 
 > This is supported-boundary workload evidence below 500 MB. It does not satisfy or redefine
 > ADR-0001's successful `>=500 MB` large-capture criterion; ADR-0008 and issue #55 keep that
@@ -12,20 +12,20 @@ This report is emitted only after the exact toolchain check, direct Cargo + `was
 
 | Measurement | Result | Limit |
 | --- | ---: | ---: |
-| Sparse ingest + index throughput (15,367,704 bytes) | 14034.4 MB/s | >= 50 MB/s |
-| Largest dense synchronous step | 5.72 ms | <= 200 ms |
-| Dense finalization checkpoint | 5.72 ms | <= 200 ms |
-| Median queued cancellation acknowledgement | 2.89 ms | <= 200 ms |
-| Cancellation while terminal batch is pending | 5.86 ms | <= 200 ms |
-| Largest option-dense hostile-tail step (2,101,248 decoded items behind the checkpoint) | 0.30 ms | <= 200 ms |
-| Option-dense hostile-tail cancellation | 0.04 ms | <= 200 ms |
+| Sparse ingest + index throughput (15,367,704 bytes) | 15215.5 MB/s | >= 50 MB/s |
+| Largest dense synchronous step | 5.06 ms | <= 200 ms |
+| Dense finalization checkpoint | 5.06 ms | <= 200 ms |
+| Median queued cancellation acknowledgement | 2.42 ms | <= 200 ms |
+| Cancellation while terminal batch is pending | 4.49 ms | <= 200 ms |
+| Largest option-dense hostile-tail step (2,101,248 decoded items behind the checkpoint) | 0.27 ms | <= 200 ms |
+| Option-dense hostile-tail cancellation | 0.03 ms | <= 200 ms |
 | Browser agent-cluster sampled high-water growth / dense capture | 1.48x | <= 2.5x |
 | Wasm linear-memory sampled high-water growth / dense capture | 1.44x | <= 2.5x |
 | Conservative modeled synchronous envelope / dense capture | 2.12x | <= 2.5x |
 | Retained capture + canonical index / dense capture | 1.26x | <= 2.5x |
 | Packet batch | 3,060,352 bytes | <= 8,388,608 bytes |
-| Packet-batch extraction + transfer | 508.4 MB/s | measured |
-| Evidence extraction + transfer | 5668.0 MB/s | measured |
+| Packet-batch extraction + transfer | 655.3 MB/s | measured |
+| Evidence extraction + transfer | 4766.3 MB/s | measured |
 | Same-size success + binary-transfer Wasm high-water growth | 0 bytes | 0 bytes |
 | Queued-cancellation Wasm high-water growth | 0 bytes | 0 bytes |
 | Fatal resource-limit Wasm high-water growth | 0 bytes | 0 bytes |
@@ -60,8 +60,8 @@ The static contract verifier rejects whole-capture JSON/text conversion; `wholeC
 | Dense retained logical total | 111,269,403 bytes |
 | Parser-buffer upper bound after begin | 8,388,610 bytes |
 | Packet-index reservation after begin | 10,485,760 bytes |
-| Auxiliary/finalization reservation after begin | 79,878,977 bytes |
-| Total logical upper bound after begin | 186,953,371 bytes |
+| Auxiliary/finalization reservation after begin | 79,881,793 bytes |
+| Total logical upper bound after begin | 186,956,187 bytes |
 
 After dense disposal, 9 queued-cancellation samples, 6 fatal resource-limit samples, sparse disposal, and each of 6 same-size success/transfer sessions, all live handle counts and retained/reserved byte counters returned to the original baseline. Cancellation and fatal-error samples also stayed at or below the Wasm high-water established by the same-size successful workload. Wasm linear memory is deliberately reported as a reusable high-water allocation; it is not described as reclaimable retained capture state.
 
@@ -77,4 +77,4 @@ After dense disposal, 9 queued-cancellation samples, 6 fatal resource-limit samp
 
 Browser memory came from `measureUserAgentSpecificMemory`. The reported runtime number is an agent-cluster sampled high-water relative to the already-loaded, idle boundary, using samples at input creation, the validating checkpoint, and binary transfer; it is not labeled as an unsampled instantaneous peak. Wasm memory was sampled after every dense step and before and after every same-size repeated success/transfer session.
 
-The conservative synchronous envelope is 186,953,371 bytes. It takes the maximum of the two-full-input `beginImport` overlap, the parser's exact retained-plus-reserved logical upper bound, and published logical state plus two bounded output buffers at the larger binary-output cap (8,388,608 bytes). Runtime samples, this source-inspected model, and exact logical counters are distinct evidence and none is presented as a substitute for the others.
+The conservative synchronous envelope is 186,956,187 bytes. It takes the maximum of the two-full-input `beginImport` overlap, the parser's exact retained-plus-reserved logical upper bound, and published logical state plus two bounded output buffers at the larger binary-output cap (8,388,608 bytes). Runtime samples, this source-inspected model, and exact logical counters are distinct evidence and none is presented as a substitute for the others.

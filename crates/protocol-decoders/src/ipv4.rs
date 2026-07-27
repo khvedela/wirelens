@@ -6,8 +6,9 @@ use packet_core::{
 };
 
 use crate::{
-    ChildIds, FragmentPosition, MAX_IPV4_OPTION_ITEMS, NetworkPayload, add_diagnostic,
-    add_named_field, finish_layer, packet_range, read_u16,
+    ChildIds, FragmentPosition, MAX_IPV4_OPTION_ITEMS, NetworkChecksumContext, NetworkDecode,
+    NetworkPayload, NetworkVersion, ProtocolFinding, add_named_field, finish_layer, packet_range,
+    read_u16, record_finding,
 };
 
 const FIXED_HEADER_LENGTH: usize = 20;
@@ -29,15 +30,6 @@ const MESSAGE_INVALID_CHECKSUM: &str =
     "IPv4 header checksum does not validate; capture offload may explain the observed value";
 
 #[derive(Clone, Copy)]
-struct Finding {
-    priority: u8,
-    code: DiagnosticCode,
-    severity: Severity,
-    evidence: ByteRange,
-    message: &'static str,
-}
-
-#[derive(Clone, Copy)]
 struct FixedHeader {
     total_length: usize,
     flags_fragment: u16,
@@ -57,7 +49,7 @@ pub(crate) fn decode(
     input: PacketDecodeInput<'_>,
     sink: &mut PacketDecodeSink<'_>,
     offset: usize,
-) -> Result<Option<NetworkPayload>, ImportError> {
+) -> Result<NetworkDecode, ImportError> {
     let available = input.bytes().len().saturating_sub(offset);
     let first = input.bytes().get(offset).copied();
     let version = first.map_or(0, |value| value >> 4);
@@ -75,14 +67,13 @@ pub(crate) fn decode(
 
     let Some(first) = first else {
         finish_layer(sink, "ipv4", layer_range, root, &children)?;
-        add_diagnostic(
-            sink,
-            DiagnosticCode::TRUNCATED_PROTOCOL,
-            Severity::Error,
-            Some(layer_range),
-            MESSAGE_TRUNCATED_HEADER,
-        )?;
-        return Ok(None);
+        return Ok(NetworkDecode::stopped(ProtocolFinding {
+            priority: 100,
+            code: DiagnosticCode::TRUNCATED_PROTOCOL,
+            severity: Severity::Error,
+            evidence: layer_range,
+            message: MESSAGE_TRUNCATED_HEADER,
+        }));
     };
     let first_range = packet_range(input, offset, 1)?;
     add_unsigned(
@@ -102,49 +93,45 @@ pub(crate) fn decode(
 
     if version != 4 {
         finish_layer(sink, "ipv4", layer_range, root, &children)?;
-        add_diagnostic(
-            sink,
-            DiagnosticCode::MALFORMED_PROTOCOL,
-            Severity::Warning,
-            Some(first_range),
-            MESSAGE_INVALID_VERSION,
-        )?;
-        return Ok(None);
+        return Ok(NetworkDecode::stopped(ProtocolFinding {
+            priority: 120,
+            code: DiagnosticCode::MALFORMED_PROTOCOL,
+            severity: Severity::Warning,
+            evidence: first_range,
+            message: MESSAGE_INVALID_VERSION,
+        }));
     }
     if declared_header_length < FIXED_HEADER_LENGTH {
         finish_layer(sink, "ipv4", layer_range, root, &children)?;
-        add_diagnostic(
-            sink,
-            DiagnosticCode::MALFORMED_PROTOCOL,
-            Severity::Warning,
-            Some(first_range),
-            MESSAGE_INVALID_HEADER_LENGTH,
-        )?;
-        return Ok(None);
+        return Ok(NetworkDecode::stopped(ProtocolFinding {
+            priority: 120,
+            code: DiagnosticCode::MALFORMED_PROTOCOL,
+            severity: Severity::Warning,
+            evidence: first_range,
+            message: MESSAGE_INVALID_HEADER_LENGTH,
+        }));
     }
 
     let fixed = add_fixed_fields(input, sink, offset, available, first, &mut children)?;
     let Some(fixed) = fixed else {
         finish_layer(sink, "ipv4", layer_range, root, &children)?;
-        add_diagnostic(
-            sink,
-            DiagnosticCode::TRUNCATED_PROTOCOL,
-            Severity::Error,
-            Some(layer_range),
-            MESSAGE_TRUNCATED_HEADER,
-        )?;
-        return Ok(None);
+        return Ok(NetworkDecode::stopped(ProtocolFinding {
+            priority: 100,
+            code: DiagnosticCode::TRUNCATED_PROTOCOL,
+            severity: Severity::Error,
+            evidence: layer_range,
+            message: MESSAGE_TRUNCATED_HEADER,
+        }));
     };
     if available < declared_header_length {
         finish_layer(sink, "ipv4", layer_range, root, &children)?;
-        add_diagnostic(
-            sink,
-            DiagnosticCode::TRUNCATED_PROTOCOL,
-            Severity::Error,
-            Some(layer_range),
-            MESSAGE_TRUNCATED_HEADER,
-        )?;
-        return Ok(None);
+        return Ok(NetworkDecode::stopped(ProtocolFinding {
+            priority: 100,
+            code: DiagnosticCode::TRUNCATED_PROTOCOL,
+            severity: Severity::Error,
+            evidence: layer_range,
+            message: MESSAGE_TRUNCATED_HEADER,
+        }));
     }
 
     decode_complete_header(
@@ -166,7 +153,7 @@ fn decode_complete_header(
     input: PacketDecodeInput<'_>,
     sink: &mut PacketDecodeSink<'_>,
     mut header: CompleteHeader,
-) -> Result<Option<NetworkPayload>, ImportError> {
+) -> Result<NetworkDecode, ImportError> {
     let header_end = header
         .offset
         .checked_add(header.declared_length)
@@ -185,7 +172,7 @@ fn decode_complete_header(
         header_range,
     )?;
 
-    let mut finding = (!checksum_valid).then_some(Finding {
+    let mut finding = (!checksum_valid).then_some(ProtocolFinding {
         priority: 10,
         code: DiagnosticCode::INVALID_PROTOCOL_CHECKSUM,
         severity: Severity::Warning,
@@ -200,33 +187,33 @@ fn decode_complete_header(
         header.fixed,
         &mut finding,
     )?;
+    let mut checksum_destination_known = true;
     if header.declared_length > FIXED_HEADER_LENGTH {
         let options_start = header
             .offset
             .checked_add(FIXED_HEADER_LENGTH)
             .ok_or(ImportError::Arithmetic)?;
-        let option_finding =
-            decode_options(input, sink, options_start, header_end, &mut header.children)?;
-        dispatch_safe &= option_finding.is_none();
-        record_finding(&mut finding, option_finding);
+        let options = decode_options(input, sink, options_start, header_end, &mut header.children)?;
+        dispatch_safe &= options.finding.is_none();
+        checksum_destination_known = !options.source_route;
+        record_finding(&mut finding, options.finding);
     }
 
     let payload = dispatch_safe
-        .then(|| network_payload(input, header.offset, header.declared_length, header.fixed))
+        .then(|| {
+            network_payload(
+                input,
+                header.offset,
+                header.declared_length,
+                header.fixed,
+                checksum_destination_known,
+            )
+        })
         .transpose()?;
 
     debug_assert_eq!(header.layer_range, header_range);
     finish_layer(sink, "ipv4", header_range, header.root, &header.children)?;
-    if let Some(finding) = finding {
-        add_diagnostic(
-            sink,
-            finding.code,
-            finding.severity,
-            Some(finding.evidence),
-            finding.message,
-        )?;
-    }
-    Ok(payload)
+    Ok(NetworkDecode::new(payload, finding))
 }
 
 fn network_payload(
@@ -234,6 +221,7 @@ fn network_payload(
     offset: usize,
     header_length: usize,
     fixed: FixedHeader,
+    checksum_destination_known: bool,
 ) -> Result<NetworkPayload, ImportError> {
     let payload_start = offset
         .checked_add(header_length)
@@ -271,11 +259,18 @@ fn network_payload(
         .ok_or(ImportError::Arithmetic)?;
 
     Ok(NetworkPayload {
+        version: NetworkVersion::Ipv4,
         next_header,
         selector_range: packet_range(input, selector_offset, 1)?,
         payload_range: packet_range(input, payload_start, captured_length)?,
         declared_length: u32::try_from(declared_length).map_err(|_| ImportError::Arithmetic)?,
         fragment,
+        checksum_context: NetworkChecksumContext {
+            source_address: packet_range(input, offset + 12, 4)?,
+            destination_address: checksum_destination_known
+                .then(|| packet_range(input, offset + 16, 4))
+                .transpose()?,
+        },
     })
 }
 
@@ -388,13 +383,13 @@ fn validate_lengths_and_fragments(
     available: usize,
     header_length: usize,
     fixed: FixedHeader,
-    finding: &mut Option<Finding>,
+    finding: &mut Option<ProtocolFinding>,
 ) -> Result<bool, ImportError> {
     let total_range = packet_range(input, offset + 2, 2)?;
     if fixed.total_length < header_length {
         record_finding(
             finding,
-            Some(Finding {
+            Some(ProtocolFinding {
                 priority: 90,
                 code: DiagnosticCode::MALFORMED_PROTOCOL,
                 severity: Severity::Warning,
@@ -407,7 +402,7 @@ fn validate_lengths_and_fragments(
     if fixed.total_length > available {
         record_finding(
             finding,
-            Some(Finding {
+            Some(ProtocolFinding {
                 priority: 100,
                 code: DiagnosticCode::TRUNCATED_PROTOCOL,
                 severity: Severity::Error,
@@ -428,7 +423,7 @@ fn validate_lengths_and_fragments(
     if contradictory {
         record_finding(
             finding,
-            Some(Finding {
+            Some(ProtocolFinding {
                 priority: 80,
                 code: DiagnosticCode::MALFORMED_PROTOCOL,
                 severity: Severity::Warning,
@@ -440,13 +435,14 @@ fn validate_lengths_and_fragments(
     Ok(!contradictory)
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_options(
     input: PacketDecodeInput<'_>,
     sink: &mut PacketDecodeSink<'_>,
     start: usize,
     end: usize,
     root_children: &mut ChildIds,
-) -> Result<Option<Finding>, ImportError> {
+) -> Result<OptionsDecode, ImportError> {
     debug_assert!(end >= start && end - start <= MAX_HEADER_LENGTH - FIXED_HEADER_LENGTH);
     let area_range = packet_range(input, start, end - start)?;
     let area_root = add_named_field(sink, "ipv4_options", FieldValue::None, area_range)?;
@@ -454,11 +450,13 @@ fn decode_options(
     let mut cursor = start;
     let mut item_count = 0_u32;
     let mut finding = None;
+    let mut source_route = false;
 
     while cursor < end {
         item_count = item_count.checked_add(1).ok_or(ImportError::Arithmetic)?;
         debug_assert!(item_count <= MAX_IPV4_OPTION_ITEMS);
         let option_type = input.bytes()[cursor];
+        source_route |= matches!(option_type, 131 | 137);
         if option_type == 0 {
             let range = packet_range(input, cursor, 1)?;
             option_children.push(add_named_field(
@@ -549,11 +547,19 @@ fn decode_options(
 
     sink.set_field_children(area_root, option_children.as_slice())?;
     root_children.push(area_root)?;
-    Ok(finding)
+    Ok(OptionsDecode {
+        finding,
+        source_route,
+    })
 }
 
-fn invalid_option_finding(evidence: ByteRange) -> Finding {
-    Finding {
+struct OptionsDecode {
+    finding: Option<ProtocolFinding>,
+    source_route: bool,
+}
+
+fn invalid_option_finding(evidence: ByteRange) -> ProtocolFinding {
+    ProtocolFinding {
         priority: 90,
         code: DiagnosticCode::MALFORMED_PROTOCOL,
         severity: Severity::Warning,
@@ -632,14 +638,6 @@ fn checksum_valid(header: &[u8]) -> bool {
     sum == u32::from(u16::MAX)
 }
 
-fn record_finding(current: &mut Option<Finding>, candidate: Option<Finding>) {
-    if let Some(candidate) = candidate {
-        if current.is_none_or(|existing| candidate.priority > existing.priority) {
-            *current = Some(candidate);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -662,8 +660,8 @@ mod tests {
             input: PacketDecodeInput<'_>,
             sink: &mut PacketDecodeSink<'_>,
         ) -> Result<(), ImportError> {
-            let payload = super::decode(input, sink, 0)?;
-            *self.observed.lock().expect("probe lock is not poisoned") = payload;
+            let decoded = super::decode(input, sink, 0)?;
+            *self.observed.lock().expect("probe lock is not poisoned") = decoded.payload;
             Ok(())
         }
     }

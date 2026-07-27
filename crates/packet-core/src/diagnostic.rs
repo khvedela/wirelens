@@ -42,7 +42,7 @@ impl DiagnosticCode {
     pub const UNSUPPORTED_ENCAPSULATION: Self = Self(10);
     /// A well-framed protocol identifier has no decoder in this version.
     pub const UNSUPPORTED_PROTOCOL: Self = Self(11);
-    /// A protocol checksum field does not validate against the captured header.
+    /// A protocol checksum field does not validate against its captured checksum domain.
     pub const INVALID_PROTOCOL_CHECKSUM: Self = Self(12);
 }
 

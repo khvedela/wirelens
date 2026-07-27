@@ -7,7 +7,8 @@ use packet_core::{
 
 use crate::{
     ChildIds, FragmentPosition, MAX_IPV6_EXTENSION_BYTES, MAX_IPV6_EXTENSION_HEADERS,
-    NetworkPayload, add_diagnostic, add_named_field, finish_layer, packet_range, read_u16,
+    NetworkChecksumContext, NetworkDecode, NetworkPayload, NetworkVersion, ProtocolFinding,
+    add_named_field, finish_layer, packet_range, read_u16, record_finding,
 };
 
 const FIXED_HEADER_LENGTH: usize = 40;
@@ -48,15 +49,6 @@ const MESSAGE_UNSUPPORTED_JUMBOGRAM: &str =
 const MESSAGE_UNSUPPORTED_ESP: &str = "IPv6 ESP payload is retained, but security-association-dependent remainder, trailer, and next-header semantics are unsupported";
 
 #[derive(Clone, Copy)]
-struct Finding {
-    priority: u8,
-    code: DiagnosticCode,
-    severity: Severity,
-    evidence: ByteRange,
-    message: &'static str,
-}
-
-#[derive(Clone, Copy)]
 enum VariableExtension {
     HopByHop,
     Routing,
@@ -80,32 +72,24 @@ struct FixedHeader {
     captured_end: usize,
     next_header: u8,
     selector_range: ByteRange,
-    finding: Option<Finding>,
+    checksum_context: NetworkChecksumContext,
+    finding: Option<ProtocolFinding>,
 }
 
 #[derive(Clone, Copy)]
 enum FixedStep {
     Complete(FixedHeader),
-    Stop(Finding),
+    Stop(ProtocolFinding),
 }
 
 pub(crate) fn decode(
     input: PacketDecodeInput<'_>,
     sink: &mut PacketDecodeSink<'_>,
     offset: usize,
-) -> Result<Option<NetworkPayload>, ImportError> {
+) -> Result<NetworkDecode, ImportError> {
     match decode_fixed_header(input, sink, offset)? {
-        FixedStep::Complete(fixed) => {
-            let result = traverse_extensions(input, sink, fixed)?;
-            if let Some(finding) = result.finding {
-                emit_finding(sink, finding)?;
-            }
-            Ok(result.payload)
-        }
-        FixedStep::Stop(finding) => {
-            emit_finding(sink, finding)?;
-            Ok(None)
-        }
+        FixedStep::Complete(fixed) => traverse_extensions(input, sink, fixed),
+        FixedStep::Stop(finding) => Ok(NetworkDecode::stopped(finding)),
     }
 }
 
@@ -121,7 +105,7 @@ fn decode_fixed_header(
 
     let Some(first) = input.bytes().get(offset).copied() else {
         finish_layer(sink, "ipv6", fixed_range, root, &children)?;
-        return Ok(FixedStep::Stop(Finding {
+        return Ok(FixedStep::Stop(ProtocolFinding {
             priority: PRIORITY_TRUNCATED,
             code: DiagnosticCode::TRUNCATED_PROTOCOL,
             severity: Severity::Error,
@@ -140,7 +124,7 @@ fn decode_fixed_header(
     )?;
     if version != 6 {
         finish_layer(sink, "ipv6", fixed_range, root, &children)?;
-        return Ok(FixedStep::Stop(Finding {
+        return Ok(FixedStep::Stop(ProtocolFinding {
             priority: PRIORITY_MALFORMED,
             code: DiagnosticCode::MALFORMED_PROTOCOL,
             severity: Severity::Warning,
@@ -152,7 +136,7 @@ fn decode_fixed_header(
     add_fixed_fields(input, sink, offset, available, first, &mut children)?;
     finish_layer(sink, "ipv6", fixed_range, root, &children)?;
     if available < FIXED_HEADER_LENGTH {
-        return Ok(FixedStep::Stop(Finding {
+        return Ok(FixedStep::Stop(ProtocolFinding {
             priority: PRIORITY_TRUNCATED,
             code: DiagnosticCode::TRUNCATED_PROTOCOL,
             severity: Severity::Error,
@@ -167,7 +151,7 @@ fn decode_fixed_header(
     let selector_range = packet_range(input, offset + 6, 1)?;
     if payload_length == 0 && next_header == HOP_BY_HOP && available > FIXED_HEADER_LENGTH {
         add_jumbogram_marker(sink, next_header, selector_range)?;
-        return Ok(FixedStep::Stop(Finding {
+        return Ok(FixedStep::Stop(ProtocolFinding {
             priority: PRIORITY_UNSUPPORTED,
             code: DiagnosticCode::UNSUPPORTED_ENCAPSULATION,
             severity: Severity::Info,
@@ -183,7 +167,7 @@ fn decode_fixed_header(
         .ok_or(ImportError::Arithmetic)?;
     let captured_end = input.bytes().len();
     let payload_length_range = packet_range(input, offset + 4, 2)?;
-    let finding = (declared_end > captured_end).then_some(Finding {
+    let finding = (declared_end > captured_end).then_some(ProtocolFinding {
         priority: PRIORITY_TRUNCATED,
         code: DiagnosticCode::TRUNCATED_PROTOCOL,
         severity: Severity::Error,
@@ -197,6 +181,10 @@ fn decode_fixed_header(
         captured_end,
         next_header,
         selector_range,
+        checksum_context: NetworkChecksumContext {
+            source_address: packet_range(input, offset + 8, 16)?,
+            destination_address: Some(packet_range(input, offset + 24, 16)?),
+        },
         finding,
     }))
 }
@@ -205,10 +193,11 @@ fn traverse_extensions(
     input: PacketDecodeInput<'_>,
     sink: &mut PacketDecodeSink<'_>,
     fixed: FixedHeader,
-) -> Result<TraversalResult, ImportError> {
+) -> Result<NetworkDecode, ImportError> {
     let mut finding = fixed.finding;
     let mut next_header = fixed.next_header;
     let mut selector_range = fixed.selector_range;
+    let mut checksum_context = fixed.checksum_context;
     let mut cursor = fixed.payload_start;
     let mut fragment = FragmentPosition::Unfragmented;
     let mut depth = 0_usize;
@@ -225,6 +214,7 @@ fn traverse_extensions(
             next_header,
             selector_range,
             fragment,
+            checksum_context,
             finding,
         )? {
             return Ok(result);
@@ -237,12 +227,10 @@ fn traverse_extensions(
             max_depth,
             &mut finding,
         )? {
-            return Ok(TraversalResult {
-                finding,
-                payload: None,
-            });
+            return Ok(NetworkDecode::new(None, finding));
         }
 
+        let traversing_routing_header = next_header == ROUTING;
         let step = decode_next_extension(
             input,
             sink,
@@ -269,19 +257,19 @@ fn traverse_extensions(
                     .checked_add(length)
                     .ok_or(ImportError::Arithmetic)?;
                 depth = depth.checked_add(1).ok_or(ImportError::Arithmetic)?;
+                if traversing_routing_header {
+                    checksum_context.destination_address = None;
+                }
                 if let Some(observed_fragment) = observed_fragment {
                     fragment = observed_fragment;
                 }
             }
             ExtensionStep::Stop { finding: stopped } => {
-                record_finding(&mut finding, stopped);
+                record_finding(&mut finding, Some(stopped));
                 if stopped.code == DiagnosticCode::RESOURCE_LIMIT {
                     add_limit_marker(sink, next_header, selector_range)?;
                 }
-                return Ok(TraversalResult {
-                    finding,
-                    payload: None,
-                });
+                return Ok(NetworkDecode::new(None, finding));
             }
             ExtensionStep::StopFragment {
                 next,
@@ -297,6 +285,7 @@ fn traverse_extensions(
                     next,
                     next_selector,
                     fragment,
+                    checksum_context,
                     finding,
                 );
             }
@@ -304,6 +293,7 @@ fn traverse_extensions(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fragment_terminal_result(
     input: PacketDecodeInput<'_>,
     fixed: FixedHeader,
@@ -311,8 +301,9 @@ fn fragment_terminal_result(
     next_header: u8,
     selector_range: ByteRange,
     fragment: FragmentPosition,
-    finding: Option<Finding>,
-) -> Result<TraversalResult, ImportError> {
+    checksum_context: NetworkChecksumContext,
+    finding: Option<ProtocolFinding>,
+) -> Result<NetworkDecode, ImportError> {
     let payload = if next_header == NO_NEXT_HEADER {
         None
     } else {
@@ -324,11 +315,13 @@ fn fragment_terminal_result(
             next_header,
             selector_range,
             fragment,
+            checksum_context,
         )?)
     };
-    Ok(TraversalResult { finding, payload })
+    Ok(NetworkDecode::new(payload, finding))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn terminal_result(
     input: PacketDecodeInput<'_>,
     fixed: FixedHeader,
@@ -336,20 +329,17 @@ fn terminal_result(
     next_header: u8,
     selector_range: ByteRange,
     fragment: FragmentPosition,
-    finding: Option<Finding>,
-) -> Result<Option<TraversalResult>, ImportError> {
+    checksum_context: NetworkChecksumContext,
+    finding: Option<ProtocolFinding>,
+) -> Result<Option<NetworkDecode>, ImportError> {
     if next_header == NO_NEXT_HEADER {
-        return Ok(Some(TraversalResult {
-            finding,
-            payload: None,
-        }));
+        return Ok(Some(NetworkDecode::new(None, finding)));
     }
     if is_extension(next_header) {
         return Ok(None);
     }
-    Ok(Some(TraversalResult {
-        finding,
-        payload: Some(terminal_payload(
+    Ok(Some(NetworkDecode::new(
+        Some(terminal_payload(
             input,
             cursor,
             fixed.declared_end,
@@ -357,8 +347,10 @@ fn terminal_result(
             next_header,
             selector_range,
             fragment,
+            checksum_context,
         )?),
-    }))
+        finding,
+    )))
 }
 
 fn stop_before_extension(
@@ -367,42 +359,36 @@ fn stop_before_extension(
     selector_range: ByteRange,
     depth: usize,
     max_depth: usize,
-    finding: &mut Option<Finding>,
+    finding: &mut Option<ProtocolFinding>,
 ) -> Result<bool, ImportError> {
     if depth >= max_depth {
         add_limit_marker(sink, next_header, selector_range)?;
         record_finding(
             finding,
-            Finding {
+            Some(ProtocolFinding {
                 priority: PRIORITY_RESOURCE_LIMIT,
                 code: DiagnosticCode::RESOURCE_LIMIT,
                 severity: Severity::Warning,
                 evidence: selector_range,
                 message: MESSAGE_EXTENSION_LIMIT,
-            },
+            }),
         );
         return Ok(true);
     }
     if next_header == HOP_BY_HOP && depth != 0 {
         record_finding(
             finding,
-            Finding {
+            Some(ProtocolFinding {
                 priority: PRIORITY_MALFORMED,
                 code: DiagnosticCode::MALFORMED_PROTOCOL,
                 severity: Severity::Warning,
                 evidence: selector_range,
                 message: MESSAGE_MISPLACED_HOP_BY_HOP,
-            },
+            }),
         );
         return Ok(true);
     }
     Ok(false)
-}
-
-#[derive(Clone, Copy)]
-struct TraversalResult {
-    finding: Option<Finding>,
-    payload: Option<NetworkPayload>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -414,6 +400,7 @@ fn terminal_payload(
     next_header: u8,
     selector_range: ByteRange,
     fragment: FragmentPosition,
+    checksum_context: NetworkChecksumContext,
 ) -> Result<NetworkPayload, ImportError> {
     let retained_end = declared_end.min(captured_end);
     let retained_length = retained_end
@@ -424,11 +411,13 @@ fn terminal_payload(
         .and_then(|length| u32::try_from(length).ok())
         .ok_or(ImportError::Arithmetic)?;
     Ok(NetworkPayload {
+        version: NetworkVersion::Ipv6,
         next_header,
         selector_range,
         payload_range: packet_range(input, cursor, retained_length)?,
         declared_length,
         fragment,
+        checksum_context,
     })
 }
 
@@ -567,7 +556,7 @@ enum ExtensionStep {
         fragment: Option<FragmentPosition>,
     },
     Stop {
-        finding: Finding,
+        finding: ProtocolFinding,
     },
     StopFragment {
         next: u8,
@@ -807,7 +796,7 @@ fn decode_authentication(
 
     if length < AH_FIXED_HEADER_LENGTH || length % 8 != 0 {
         return Ok(ExtensionStep::Stop {
-            finding: Finding {
+            finding: ProtocolFinding {
                 priority: PRIORITY_MALFORMED,
                 code: DiagnosticCode::MALFORMED_PROTOCOL,
                 severity: Severity::Warning,
@@ -874,7 +863,7 @@ fn decode_esp(
     }
     finish_layer(sink, "ipv6_esp", layer_range, root, &children)?;
     Ok(ExtensionStep::Stop {
-        finding: Finding {
+        finding: ProtocolFinding {
             priority: PRIORITY_UNSUPPORTED,
             code: DiagnosticCode::UNSUPPORTED_ENCAPSULATION,
             severity: Severity::Info,
@@ -894,10 +883,10 @@ fn validate_extension_extent(
     traversed_bytes: usize,
     max_bytes: usize,
     evidence: ByteRange,
-) -> Result<Option<Finding>, ImportError> {
+) -> Result<Option<ProtocolFinding>, ImportError> {
     let end = cursor.checked_add(length).ok_or(ImportError::Arithmetic)?;
     if end > declared_end {
-        return Ok(Some(Finding {
+        return Ok(Some(ProtocolFinding {
             priority: PRIORITY_MALFORMED,
             code: DiagnosticCode::MALFORMED_PROTOCOL,
             severity: Severity::Warning,
@@ -909,7 +898,7 @@ fn validate_extension_extent(
         .checked_add(length)
         .ok_or(ImportError::Arithmetic)?;
     if total > max_bytes {
-        return Ok(Some(Finding {
+        return Ok(Some(ProtocolFinding {
             priority: PRIORITY_RESOURCE_LIMIT,
             code: DiagnosticCode::RESOURCE_LIMIT,
             severity: Severity::Warning,
@@ -924,7 +913,7 @@ fn validate_extension_extent(
         } else {
             packet_range(input, cursor, captured_length)?
         };
-        return Ok(Some(Finding {
+        return Ok(Some(ProtocolFinding {
             priority: PRIORITY_TRUNCATED,
             code: DiagnosticCode::TRUNCATED_PROTOCOL,
             severity: Severity::Error,
@@ -942,10 +931,10 @@ fn validate_prefix_extent(
     declared_end: usize,
     captured_end: usize,
     evidence: ByteRange,
-) -> Result<Option<Finding>, ImportError> {
+) -> Result<Option<ProtocolFinding>, ImportError> {
     let end = cursor.checked_add(length).ok_or(ImportError::Arithmetic)?;
     if end > declared_end {
-        return Ok(Some(Finding {
+        return Ok(Some(ProtocolFinding {
             priority: PRIORITY_MALFORMED,
             code: DiagnosticCode::MALFORMED_PROTOCOL,
             severity: Severity::Warning,
@@ -962,7 +951,7 @@ fn validate_prefix_extent(
     } else {
         packet_range(input, cursor, captured_length.min(length))?
     };
-    Ok(Some(Finding {
+    Ok(Some(ProtocolFinding {
         priority: PRIORITY_TRUNCATED,
         code: DiagnosticCode::TRUNCATED_PROTOCOL,
         severity: Severity::Error,
@@ -1113,22 +1102,6 @@ fn add_bytes(
     )?)
 }
 
-fn record_finding(current: &mut Option<Finding>, candidate: Finding) {
-    if current.is_none_or(|existing| candidate.priority > existing.priority) {
-        *current = Some(candidate);
-    }
-}
-
-fn emit_finding(sink: &mut PacketDecodeSink<'_>, finding: Finding) -> Result<(), ImportError> {
-    add_diagnostic(
-        sink,
-        finding.code,
-        finding.severity,
-        Some(finding.evidence),
-        finding.message,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -1151,8 +1124,8 @@ mod tests {
             input: PacketDecodeInput<'_>,
             sink: &mut PacketDecodeSink<'_>,
         ) -> Result<(), ImportError> {
-            let payload = super::decode(input, sink, 0)?;
-            *self.observed.lock().expect("probe lock is not poisoned") = payload;
+            let decoded = super::decode(input, sink, 0)?;
+            *self.observed.lock().expect("probe lock is not poisoned") = decoded.payload;
             Ok(())
         }
     }
@@ -1230,6 +1203,14 @@ mod tests {
         assert_eq!(payload.selector_range, ByteRange::new(80, 1).unwrap());
         assert_eq!(payload.payload_range, ByteRange::new(88, 4).unwrap());
         assert_eq!(payload.declared_length, 20);
+        assert_eq!(payload.version, NetworkVersion::Ipv6);
+        assert_eq!(
+            payload.checksum_context,
+            NetworkChecksumContext {
+                source_address: ByteRange::new(48, 16).unwrap(),
+                destination_address: Some(ByteRange::new(64, 16).unwrap()),
+            }
+        );
         assert_eq!(
             payload.fragment,
             FragmentPosition::Initial {
@@ -1256,6 +1237,22 @@ mod tests {
             }
         );
         assert!(!payload.fragment.allows_transport_header());
+    }
+
+    #[test]
+    fn routing_header_makes_checksum_destination_unknown() {
+        let mut captured_payload = vec![17, 0, 0, 0, 0, 0, 0, 0];
+        captured_payload.extend([0; 8]);
+        let payload = probe(&packet(43, &captured_payload, 16))
+            .expect("a traversed Routing header reaches its terminal payload");
+
+        assert_eq!(payload.version, NetworkVersion::Ipv6);
+        assert_eq!(payload.next_header, 17);
+        assert_eq!(
+            payload.checksum_context.source_address,
+            ByteRange::new(48, 16).unwrap()
+        );
+        assert_eq!(payload.checksum_context.destination_address, None);
     }
 
     #[test]

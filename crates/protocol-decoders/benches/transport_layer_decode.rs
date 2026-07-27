@@ -1,4 +1,4 @@
-//! Directional framing-versus-network-decode benchmark using generated packets.
+//! Directional framing-versus-transport-decode benchmark using generated TCP packets.
 //!
 //! This dependency-free harness prints local measurements only. It is not a
 //! product throughput claim and its synthetic packets contain no captured data.
@@ -8,7 +8,7 @@ use std::{hint::black_box, time::Instant};
 use packet_core::{CaptureDataset, CaptureImporter, ImportLimits, ImportStep};
 use protocol_decoders::LinkLayerDecoder;
 
-const PACKET_COUNT: u32 = 20_000;
+const PACKET_COUNT: u32 = 10_000;
 const NETWORK_PACKET_LENGTH: usize = 1_500;
 const ETHERNET_PACKET_LENGTH: usize = 14 + NETWORK_PACKET_LENGTH;
 const RECORD_LENGTH: usize = 16 + ETHERNET_PACKET_LENGTH;
@@ -25,7 +25,10 @@ fn main() {
     assert_eq!(decoded.metadata().packet_count, u64::from(PACKET_COUNT));
     assert!(framing.layers().is_empty());
     assert!(framing.fields().is_empty());
-    assert!(decoded.layers().len() > usize::try_from(PACKET_COUNT).expect("count fits usize"));
+    assert_eq!(
+        decoded.layers().len(),
+        usize::try_from(PACKET_COUNT).expect("count fits usize") * 3
+    );
     assert!(decoded.fields().len() > decoded.layers().len());
     assert!(decoded.diagnostics().is_empty());
 
@@ -34,8 +37,7 @@ fn main() {
     let framing_rate = mebibytes / framing_elapsed.as_secs_f64();
     let decoded_rate = mebibytes / decoded_elapsed.as_secs_f64();
     eprintln!(
-        "network_layer_decode: {PACKET_COUNT} packets, {mebibytes:.2} MiB; framing {framing_elapsed:?} ({framing_rate:.2} MiB/s); full decode {decoded_elapsed:?} ({decoded_rate:.2} MiB/s, {} layers, {} fields); decode/framing {:.2}x",
-        decoded.layers().len(),
+        "transport_layer_decode: {PACKET_COUNT} packets, {mebibytes:.2} MiB; framing {framing_elapsed:?} ({framing_rate:.2} MiB/s); TCP decode {decoded_elapsed:?} ({decoded_rate:.2} MiB/s, {} fields); decode/framing {:.2}x",
         decoded.fields().len(),
         decoded_elapsed.as_secs_f64() / framing_elapsed.as_secs_f64(),
     );
@@ -72,13 +74,11 @@ fn import(bytes: Box<[u8]>, decode: bool) -> (CaptureDataset, std::time::Duratio
 }
 
 fn synthetic_capture(packet_count: u32) -> Vec<u8> {
-    let ipv4 = ethernet(0x0800, &maximal_ipv4_packet());
-    let ipv6 = ethernet(0x86dd, &extension_dense_ipv6_packet());
-    assert_eq!(ipv4.len(), ETHERNET_PACKET_LENGTH);
-    assert_eq!(ipv6.len(), ETHERNET_PACKET_LENGTH);
+    let packet = ethernet(&tcp_ipv4_packet());
+    assert_eq!(packet.len(), ETHERNET_PACKET_LENGTH);
 
-    let packet_count_usize = usize::try_from(packet_count).expect("packet count fits usize");
-    let mut output = Vec::with_capacity(24 + packet_count_usize * RECORD_LENGTH);
+    let packet_count = usize::try_from(packet_count).expect("packet count fits usize");
+    let mut output = Vec::with_capacity(24 + packet_count * RECORD_LENGTH);
     output.extend([0xd4, 0xc3, 0xb2, 0xa1]);
     output.extend(2_u16.to_le_bytes());
     output.extend(4_u16.to_le_bytes());
@@ -86,68 +86,93 @@ fn synthetic_capture(packet_count: u32) -> Vec<u8> {
     output.extend(0_u32.to_le_bytes());
     output.extend(65_535_u32.to_le_bytes());
     output.extend(1_u32.to_le_bytes());
-    for packet_index in 0..packet_count {
-        let packet = if packet_index % 2 == 0 { &ipv4 } else { &ipv6 };
-        let packet_length = u32::try_from(packet.len()).expect("generated packet length fits u32");
+    for packet_index in 0..u32::try_from(packet_count).expect("count fits u32") {
+        let packet_length = u32::try_from(packet.len()).expect("packet length fits u32");
         output.extend(packet_index.to_le_bytes());
         output.extend((packet_index % 1_000_000).to_le_bytes());
         output.extend(packet_length.to_le_bytes());
         output.extend(packet_length.to_le_bytes());
-        output.extend(packet);
+        output.extend(&packet);
     }
     output
 }
 
-fn ethernet(ether_type: u16, payload: &[u8]) -> Vec<u8> {
+fn ethernet(payload: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(14 + payload.len());
     output.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
     output.extend([0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb]);
-    output.extend(ether_type.to_be_bytes());
+    output.extend(0x0800_u16.to_be_bytes());
     output.extend(payload);
     output
 }
 
-fn maximal_ipv4_packet() -> Vec<u8> {
+fn tcp_ipv4_packet() -> Vec<u8> {
+    const IPV4_HEADER_LENGTH: usize = 20;
+    const TCP_HEADER_LENGTH: usize = 40;
+    const TCP_LENGTH: usize = NETWORK_PACKET_LENGTH - IPV4_HEADER_LENGTH;
+    const SOURCE: [u8; 4] = [192, 0, 2, 1];
+    const DESTINATION: [u8; 4] = [198, 51, 100, 2];
+
     let mut packet = Vec::with_capacity(NETWORK_PACKET_LENGTH);
-    packet.extend([0x4f, 0]);
+    packet.extend([0x45, 0]);
     packet.extend(1_500_u16.to_be_bytes());
     packet.extend(0x1234_u16.to_be_bytes());
     packet.extend(0_u16.to_be_bytes());
-    packet.extend([64, 253]);
+    packet.extend([64, 6]);
     packet.extend(0_u16.to_be_bytes());
-    packet.extend([192, 0, 2, 1]);
-    packet.extend([198, 51, 100, 2]);
-    for _ in 0..20 {
-        packet.extend([0x1e, 2]);
-    }
+    packet.extend(SOURCE);
+    packet.extend(DESTINATION);
+    let ipv4_checksum = checksum(&[&packet]);
+    packet[10..12].copy_from_slice(&ipv4_checksum.to_be_bytes());
+
+    let tcp_start = packet.len();
+    packet.extend(12_345_u16.to_be_bytes());
+    packet.extend(443_u16.to_be_bytes());
+    packet.extend(0x0102_0304_u32.to_be_bytes());
+    packet.extend(0x0506_0708_u32.to_be_bytes());
+    packet.extend([0xa0, 0x18]);
+    packet.extend(32_768_u16.to_be_bytes());
+    packet.extend(0_u16.to_be_bytes());
+    packet.extend(0_u16.to_be_bytes());
+    packet.extend([2, 4, 0x05, 0xb4]);
+    packet.extend([1, 3, 3, 7]);
+    packet.extend([4, 2]);
+    packet.extend([8, 10, 0, 0, 0, 1, 0, 0, 0, 2]);
+    assert_eq!(packet.len(), tcp_start + TCP_HEADER_LENGTH);
     packet.resize(NETWORK_PACKET_LENGTH, 0xa5);
-    let checksum = ipv4_checksum(&packet[..60]);
-    packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+
+    let pseudo_protocol = [0, 6];
+    let tcp_length = u16::try_from(TCP_LENGTH)
+        .expect("synthetic TCP length fits u16")
+        .to_be_bytes();
+    let tcp_checksum = checksum(&[
+        &SOURCE,
+        &DESTINATION,
+        &pseudo_protocol,
+        &tcp_length,
+        &packet[tcp_start..],
+    ]);
+    packet[tcp_start + 16..tcp_start + 18].copy_from_slice(&tcp_checksum.to_be_bytes());
     packet
 }
 
-fn ipv4_checksum(header: &[u8]) -> u16 {
-    let mut sum = 0_u32;
-    for pair in header.chunks_exact(2) {
-        sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+fn checksum(parts: &[&[u8]]) -> u16 {
+    let mut sum = 0_u64;
+    let mut high = None;
+    for part in parts {
+        for &byte in *part {
+            if let Some(high) = high.take() {
+                sum += u64::from(u16::from_be_bytes([high, byte]));
+            } else {
+                high = Some(byte);
+            }
+        }
     }
-    while sum > u32::from(u16::MAX) {
-        sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+    if let Some(high) = high {
+        sum += u64::from(u16::from_be_bytes([high, 0]));
+    }
+    while sum > u64::from(u16::MAX) {
+        sum = (sum & u64::from(u16::MAX)) + (sum >> 16);
     }
     !u16::try_from(sum).expect("folded checksum fits u16")
-}
-
-fn extension_dense_ipv6_packet() -> Vec<u8> {
-    let mut packet = Vec::with_capacity(NETWORK_PACKET_LENGTH);
-    packet.extend(0x6000_0000_u32.to_be_bytes());
-    packet.extend(1_460_u16.to_be_bytes());
-    packet.extend([60, 64]);
-    packet.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    packet.extend([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-    for index in 0..8 {
-        let next_header = if index == 7 { 253 } else { 60 };
-        packet.extend([next_header, 0, 0, 0, 0, 0, 0, 0]);
-    }
-    packet.resize(NETWORK_PACKET_LENGTH, 0x5a);
-    packet
 }

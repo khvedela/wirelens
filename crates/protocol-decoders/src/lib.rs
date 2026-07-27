@@ -4,12 +4,17 @@
 //! arena facts with absolute evidence ranges. They do not depend on a browser,
 //! WebAssembly, or UI framework. The link-layer decoder intentionally supports
 //! Ethernet II, one customer 802.1Q tag, and Ethernet/IPv4 ARP. It also decodes
-//! bounded IPv4 and IPv6 headers while leaving transport payloads uninterpreted.
+//! bounded IPv4, IPv6, TCP, UDP, ICMP, and `ICMPv6` headers. Application payloads
+//! remain borrowed and uninterpreted at the transport handoff.
 
 #![forbid(unsafe_code)]
 
+mod checksum;
+mod icmp;
 mod ipv4;
 mod ipv6;
+mod tcp;
+mod udp;
 
 use packet_core::{
     ByteRange, DiagnosticCode, FieldId, FieldValue, ImportError, PacketDecodeInput,
@@ -61,17 +66,33 @@ pub const LINK_LAYER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 21;
 /// Maximum protocol layers emitted by any current decoder path per packet.
 pub const DECODER_MAX_LAYERS_PER_PACKET: u32 = 12;
 /// Maximum decoded fields emitted by any current decoder path per packet.
-pub const DECODER_MAX_FIELDS_PER_PACKET: u32 = 91;
+pub const DECODER_MAX_FIELDS_PER_PACKET: u32 = 173;
 /// Maximum field-child references emitted by any current decoder path per packet.
-pub const DECODER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 88;
+pub const DECODER_MAX_FIELD_CHILDREN_PER_PACKET: u32 = 169;
 /// Conservative ceiling for the complete decoder vocabulary.
-pub const DECODER_VOCABULARY_COUNT_UPPER_BOUND: u32 = 192;
+pub const DECODER_VOCABULARY_COUNT_UPPER_BOUND: u32 = 256;
 /// Maximum number of IPv4 option items decoded from the IHL-bounded header.
 pub const MAX_IPV4_OPTION_ITEMS: u32 = 40;
 /// Maximum number of common IPv6 extension headers traversed per packet.
 pub const MAX_IPV6_EXTENSION_HEADERS: u32 = 8;
 /// Maximum cumulative bytes traversed across IPv6 extension headers.
 pub const MAX_IPV6_EXTENSION_BYTES: u32 = 512;
+/// Maximum number of TCP option items decoded from the data-offset-bounded header.
+pub const MAX_TCP_OPTION_ITEMS: u32 = 40;
+/// Maximum TCP option bytes permitted by the four-bit TCP data offset.
+pub const MAX_TCP_OPTION_BYTES: u32 = 40;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NetworkVersion {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NetworkChecksumContext {
+    pub(crate) source_address: ByteRange,
+    pub(crate) destination_address: Option<ByteRange>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FragmentPosition {
@@ -86,21 +107,94 @@ pub(crate) enum FragmentPosition {
 }
 
 impl FragmentPosition {
-    const fn allows_transport_header(self) -> bool {
+    pub(crate) const fn allows_transport_header(self) -> bool {
         !matches!(self, Self::NonInitial { .. })
+    }
+
+    pub(crate) const fn is_complete_datagram(self) -> bool {
+        matches!(
+            self,
+            Self::Unfragmented
+                | Self::Initial {
+                    more_fragments: false
+                }
+        )
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NetworkPayload {
+    pub(crate) version: NetworkVersion,
     pub(crate) next_header: u8,
     pub(crate) selector_range: ByteRange,
     pub(crate) payload_range: ByteRange,
     pub(crate) declared_length: u32,
     pub(crate) fragment: FragmentPosition,
+    pub(crate) checksum_context: NetworkChecksumContext,
 }
 
-/// Stateless Ethernet, single-tag VLAN, ARP, IPv4, and IPv6 decoder.
+#[derive(Clone, Copy)]
+pub(crate) struct ProtocolFinding {
+    pub(crate) priority: u8,
+    pub(crate) code: DiagnosticCode,
+    pub(crate) severity: Severity,
+    pub(crate) evidence: ByteRange,
+    pub(crate) message: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NetworkDecode {
+    pub(crate) payload: Option<NetworkPayload>,
+    pub(crate) finding: Option<ProtocolFinding>,
+}
+
+impl NetworkDecode {
+    pub(crate) const fn new(
+        payload: Option<NetworkPayload>,
+        finding: Option<ProtocolFinding>,
+    ) -> Self {
+        Self { payload, finding }
+    }
+
+    pub(crate) const fn stopped(finding: ProtocolFinding) -> Self {
+        Self {
+            payload: None,
+            finding: Some(finding),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransportProtocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TransportPayload {
+    pub(crate) protocol: TransportProtocol,
+    pub(crate) source_port: u16,
+    pub(crate) destination_port: u16,
+    pub(crate) payload_range: ByteRange,
+    pub(crate) declared_length: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TransportDecode {
+    pub(crate) payload: Option<TransportPayload>,
+    pub(crate) finding: Option<ProtocolFinding>,
+}
+
+impl TransportDecode {
+    pub(crate) const fn new(
+        payload: Option<TransportPayload>,
+        finding: Option<ProtocolFinding>,
+    ) -> Self {
+        Self { payload, finding }
+    }
+}
+
+/// Stateless link, network, and bounded transport/control protocol decoder.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LinkLayerDecoder;
 
@@ -192,18 +286,12 @@ fn dispatch_ether_type(
         ETHER_TYPE_ARP => decode_arp(input, sink, payload_offset),
         ETHER_TYPE_VLAN if !inside_vlan => decode_vlan(input, sink),
         ETHER_TYPE_IPV4 => {
-            let payload = ipv4::decode(input, sink, payload_offset)?;
-            if let Some(payload) = payload {
-                dispatch_network_payload(input, payload);
-            }
-            Ok(())
+            let decoded = ipv4::decode(input, sink, payload_offset)?;
+            dispatch_network_decode(input, sink, decoded)
         }
         ETHER_TYPE_IPV6 => {
-            let payload = ipv6::decode(input, sink, payload_offset)?;
-            if let Some(payload) = payload {
-                dispatch_network_payload(input, payload);
-            }
-            Ok(())
+            let decoded = ipv6::decode(input, sink, payload_offset)?;
+            dispatch_network_decode(input, sink, decoded)
         }
         0..=1500 => add_unsupported_encapsulation(
             input,
@@ -258,17 +346,65 @@ fn dispatch_ether_type(
     }
 }
 
-fn dispatch_network_payload(input: PacketDecodeInput<'_>, payload: NetworkPayload) {
+fn dispatch_network_decode(
+    input: PacketDecodeInput<'_>,
+    sink: &mut PacketDecodeSink<'_>,
+    decoded: NetworkDecode,
+) -> Result<(), ImportError> {
+    let mut finding = decoded.finding;
+    if let Some(payload) = decoded.payload {
+        let transport = dispatch_network_payload(input, sink, payload)?;
+        if let Some(transport) = transport {
+            record_finding(&mut finding, transport.finding);
+            if let Some(payload) = transport.payload {
+                dispatch_transport_payload(input, payload);
+            }
+        }
+    }
+    if let Some(finding) = finding {
+        emit_protocol_finding(sink, finding)?;
+    }
+    Ok(())
+}
+
+fn dispatch_network_payload(
+    input: PacketDecodeInput<'_>,
+    sink: &mut PacketDecodeSink<'_>,
+    payload: NetworkPayload,
+) -> Result<Option<TransportDecode>, ImportError> {
     debug_assert!(payload.payload_range.start() >= input.data_range().start());
     debug_assert!(payload.payload_range.end() <= input.data_range().end());
     debug_assert!(u64::from(payload.payload_range.length()) <= u64::from(payload.declared_length));
 
-    if payload.fragment.allows_transport_header() {
-        // This is the single bounded network-to-transport handoff. Issue #14
-        // attaches TCP, UDP, ICMP, and ICMPv6 decoders here; until then the
-        // exact selector and borrowed payload evidence remain uninterpreted.
-        let _ = (payload.next_header, payload.selector_range);
+    if !payload.fragment.allows_transport_header() {
+        return Ok(None);
     }
+    match (payload.version, payload.next_header) {
+        (NetworkVersion::Ipv4, 1) => icmp::decode_v4(input, sink, payload).map(Some),
+        (NetworkVersion::Ipv4 | NetworkVersion::Ipv6, 6) => {
+            tcp::decode(input, sink, payload).map(Some)
+        }
+        (NetworkVersion::Ipv4 | NetworkVersion::Ipv6, 17) => {
+            udp::decode(input, sink, payload).map(Some)
+        }
+        (NetworkVersion::Ipv6, 58) => icmp::decode_v6(input, sink, payload).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn dispatch_transport_payload(input: PacketDecodeInput<'_>, payload: TransportPayload) {
+    debug_assert!(payload.payload_range.start() >= input.data_range().start());
+    debug_assert!(payload.payload_range.end() <= input.data_range().end());
+    debug_assert!(u64::from(payload.payload_range.length()) <= u64::from(payload.declared_length));
+
+    // This is the single bounded transport-to-application handoff. Issue #15
+    // attaches DNS framing here; until then the exact ports and borrowed
+    // payload evidence remain uninterpreted.
+    let _ = (
+        payload.protocol,
+        payload.source_port,
+        payload.destination_port,
+    );
 }
 
 fn decode_vlan(
@@ -744,6 +880,30 @@ pub(crate) fn add_diagnostic(
     sink.add_diagnostic(code, severity, Recovery::Continued, evidence, message)
 }
 
+pub(crate) fn record_finding(
+    current: &mut Option<ProtocolFinding>,
+    candidate: Option<ProtocolFinding>,
+) {
+    if let Some(candidate) = candidate {
+        if current.is_none_or(|existing| candidate.priority > existing.priority) {
+            *current = Some(candidate);
+        }
+    }
+}
+
+pub(crate) fn emit_protocol_finding(
+    sink: &mut PacketDecodeSink<'_>,
+    finding: ProtocolFinding,
+) -> Result<(), ImportError> {
+    add_diagnostic(
+        sink,
+        finding.code,
+        finding.severity,
+        Some(finding.evidence),
+        finding.message,
+    )
+}
+
 pub(crate) fn packet_range(
     input: PacketDecodeInput<'_>,
     offset: usize,
@@ -757,9 +917,32 @@ pub(crate) fn packet_range(
         .ok_or(ImportError::Arithmetic)
 }
 
+pub(crate) fn packet_slice(
+    input: PacketDecodeInput<'_>,
+    range: ByteRange,
+) -> Result<&[u8], ImportError> {
+    let relative_start = range
+        .start()
+        .checked_sub(input.data_range().start())
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(ImportError::Arithmetic)?;
+    let relative_end = relative_start
+        .checked_add(range.length() as usize)
+        .ok_or(ImportError::Arithmetic)?;
+    input
+        .bytes()
+        .get(relative_start..relative_end)
+        .ok_or(ImportError::Arithmetic)
+}
+
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let source: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
     Some(u16::from_be_bytes(source))
+}
+
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let source: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_be_bytes(source))
 }
 
 pub(crate) struct ChildIds {

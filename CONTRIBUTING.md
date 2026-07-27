@@ -81,7 +81,7 @@ done
 ```
 
 The weekly workflow uses the same pinned fuzz toolchain for bounded importer, whole-capture decoder,
-and focused network-decoder mutation campaigns. Local longer runs use the matching target and corpus;
+and focused network/transport-decoder mutation campaigns. Local longer runs use the matching target and corpus;
 the focused target's extra selector byte makes its libFuzzer input limit 4,097 bytes:
 
 ```sh
