@@ -9,6 +9,7 @@
 mod correlation;
 mod diagnostic;
 mod field;
+mod flow;
 mod import;
 mod model;
 mod range;
@@ -19,6 +20,12 @@ pub use correlation::{
 };
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Severity};
 pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
+pub use flow::{
+    BidirectionalFlow, FlowDirection, FlowId, FlowReconstructionError, PacketEvidence,
+    PacketPairEvidence, TcpConnectionEstablishment, TcpConnectionFailureCause,
+    TcpConnectionHeuristic, TcpConnectionTermination, TcpDirectionalIndicator,
+    TcpHeuristicConfidence, TransportProtocol,
+};
 pub use import::{
     CaptureImporter, ImportError, ImportLimitKind, ImportLimits, ImportProgress, ImportStep,
     PacketDecodeInput, PacketDecodeSink, PacketDecoder, decoder_scratch_bytes_upper_bound,
