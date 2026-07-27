@@ -243,6 +243,7 @@ export function PacketDetailWorkspace({
   if (packetCount === 0) {
     return (
       <section
+        id="packet-detail-workspace"
         className="packet-detail-workspace packet-detail-workspace--empty"
         aria-labelledby="packet-detail-title"
       >
@@ -264,6 +265,7 @@ export function PacketDetailWorkspace({
 
   return (
     <section
+      id="packet-detail-workspace"
       className="packet-detail-workspace"
       data-testid="packet-detail-workspace"
       data-packet-id={packetId}
