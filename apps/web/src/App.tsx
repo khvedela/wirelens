@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import { CaptureImporter } from "./features/capture-import/CaptureImporter";
 import type {
   CaptureImportModel,
@@ -5,10 +7,24 @@ import type {
 } from "./features/capture-import/import-state";
 import { PacketDetailWorkspace, type PacketDetailWorkspaceProps } from "./features/packet-detail";
 
+type VisualTheme = "dark" | "light";
+
 const BOOTING_MODEL: CaptureImportModel = { phase: "booting" };
+const THEME_STORAGE_KEY = "wirelens:theme";
 const NOOP = (): void => undefined;
 const NOOP_FILE = (_file: File): void => undefined;
 const NOOP_REJECTION = (_rejection: CaptureSelectionRejection): void => undefined;
+const DEFAULT_THEME: VisualTheme = "light";
+
+function normalizeTheme(value: string | null): VisualTheme | undefined {
+  return value === "dark" || value === "light" ? value : undefined;
+}
+
+function detectDefaultTheme(): VisualTheme {
+  if (typeof window === "undefined") return DEFAULT_THEME;
+  if (typeof window.matchMedia !== "function") return DEFAULT_THEME;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
 
 export interface AppProps {
   readonly importModel?: CaptureImportModel;
@@ -32,8 +48,31 @@ export function App({
     completedSummary !== undefined &&
     completedSummary.datasetGeneration !== undefined &&
     packetInspection !== undefined;
+  const [theme, setTheme] = useState<VisualTheme>(() => {
+    if (typeof window === "undefined") return DEFAULT_THEME;
+    return normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY)) ?? detectDefaultTheme();
+  });
+
+  useEffect(() => {
+    if (theme === "dark") {
+      document.documentElement.setAttribute("data-theme", "dark");
+      document.documentElement.style.colorScheme = "dark";
+    } else {
+      document.documentElement.setAttribute("data-theme", "light");
+      document.documentElement.style.colorScheme = "light";
+    }
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const toggleTheme = (): void => {
+    setTheme((previousTheme) => (previousTheme === "dark" ? "light" : "dark"));
+  };
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
       <header className="site-header">
         <div className="site-header__inner">
           <div className="wordmark">
@@ -46,7 +85,20 @@ export function App({
             <span aria-hidden="true" />
             Local analysis
           </span>
+          <button
+            className="theme-toggle button button--secondary"
+            type="button"
+            onClick={toggleTheme}
+            aria-label="Toggle light and dark theme"
+            aria-pressed={theme === "dark"}
+          >
+            {theme === "dark" ? "Use light theme" : "Use dark theme"}
+          </button>
         </div>
+        <nav aria-label="Primary" className="app-nav">
+          <a href="#capture-import">Capture import</a>
+          {inspectionReady ? <a href="#packet-detail-workspace">Packet detail</a> : null}
+        </nav>
       </header>
 
       <main
@@ -77,13 +129,15 @@ export function App({
           </aside>
         </section>
 
-        <CaptureImporter
-          model={importModel}
-          onCancel={onCancelImport}
-          onFileSelected={onFileSelected}
-          onReset={onResetImport}
-          onSelectionRejected={onSelectionRejected}
-        />
+        <section id="capture-import">
+          <CaptureImporter
+            model={importModel}
+            onCancel={onCancelImport}
+            onFileSelected={onFileSelected}
+            onReset={onResetImport}
+            onSelectionRejected={onSelectionRejected}
+          />
+        </section>
         {inspectionReady ? (
           <PacketDetailWorkspace
             {...packetInspection}
