@@ -22,9 +22,11 @@ pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Seve
 pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
 pub use flow::{
     BidirectionalFlow, FlowDirection, FlowId, FlowMetrics, FlowReconstructionError, PacketEvidence,
-    PacketPairEvidence, PacketSizeDistribution, TcpConnectionEstablishment,
-    TcpConnectionFailureCause, TcpConnectionHeuristic, TcpConnectionTermination,
-    TcpDirectionalIndicator, TcpFlowDuration, TcpHeuristicConfidence, TransportProtocol,
+    PacketPairEvidence, PacketSequenceAggregate, PacketSequenceFlags, PacketSequenceLane,
+    PacketSequenceMessage, PacketSequenceTimeline, PacketSequenceTimelineEntry,
+    PacketSizeDistribution, TcpConnectionEstablishment, TcpConnectionFailureCause,
+    TcpConnectionHeuristic, TcpConnectionTermination, TcpDirectionalIndicator, TcpFlowDuration,
+    TcpHeuristicConfidence, TransportProtocol,
 };
 pub use import::{
     CaptureImporter, ImportError, ImportLimitKind, ImportLimits, ImportProgress, ImportStep,

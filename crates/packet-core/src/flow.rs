@@ -322,6 +322,84 @@ impl From<PacketSizeAccumulator> for PacketSizeDistribution {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSequenceFlags {
+    /// TCP SYN flag captured for the packet.
+    pub syn: bool,
+    /// TCP ACK flag captured for the packet.
+    pub ack: bool,
+    /// TCP FIN flag captured for the packet.
+    pub fin: bool,
+    /// TCP RST flag captured for the packet.
+    pub rst: bool,
+}
+
+/// Message-level timing and metadata for packet-sequence timelines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketSequenceMessage {
+    /// Packet identifier for the timeline element.
+    pub packet_id: PacketId,
+    /// Relative timestamp from the flow start, when both timestamps are available.
+    pub relative_offset: Option<TcpFlowDuration>,
+    /// Absolute packet capture timestamp.
+    pub timestamp: Option<CaptureTimestamp>,
+    /// Canonical flow direction for this message.
+    pub direction: FlowDirection,
+    /// Captured packet bytes.
+    pub packet_size_bytes: u32,
+    /// Optional TCP flags.
+    pub tcp_flags: Option<PacketSequenceFlags>,
+}
+
+/// Aggregated packet sequence group for timeline zoom.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacketSequenceAggregate {
+    /// Number of packets in the aggregate.
+    pub packet_count: u64,
+    /// First packet in the aggregate.
+    pub first_packet: PacketId,
+    /// Last packet in the aggregate.
+    pub last_packet: PacketId,
+    /// First packet size bytes.
+    pub first_packet_size_bytes: u32,
+    /// Last packet size bytes.
+    pub last_packet_size_bytes: u32,
+    /// Total bytes across the aggregate.
+    pub total_packet_bytes: u64,
+    /// Relative offset for the first packet in the aggregate.
+    pub first_offset: Option<TcpFlowDuration>,
+    /// Relative offset for the last packet in the aggregate.
+    pub last_offset: Option<TcpFlowDuration>,
+    /// Lowest relative offset in the aggregate.
+    pub min_offset: Option<TcpFlowDuration>,
+    /// Highest relative offset in the aggregate.
+    pub max_offset: Option<TcpFlowDuration>,
+}
+
+/// Packet-sequence timeline element.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PacketSequenceTimelineEntry {
+    /// Single packet message with source evidence.
+    Packet(PacketSequenceMessage),
+    /// Aggregated packet segment.
+    Aggregate(PacketSequenceAggregate),
+}
+
+/// Endpoint lane references for a timeline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacketSequenceLane {
+    /// Endpoint represented by this lane.
+    pub endpoint: FlowEndpoint,
+    /// Message indices for the lane, in timeline order.
+    pub message_indices: Box<[usize]>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PacketSequenceTimelineAccumulator {
+    flow: FlowAccumulator,
+    messages: Vec<PacketSequenceMessage>,
+}
+
 /// Per-flow traffic and timing summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlowMetrics {
@@ -363,6 +441,121 @@ pub struct FlowMetrics {
     pub time_to_first_data: Option<TcpFlowDuration>,
     /// True when results are likely constrained by a partial viewpoint.
     pub partial_capture: bool,
+}
+
+/// Per-flow packet sequence and timeline projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacketSequenceTimeline {
+    /// Stable flow identity.
+    pub id: FlowId,
+    /// Capture interface that owns this timeline.
+    pub interface_id: InterfaceId,
+    /// Transport protocol for the flow.
+    pub protocol: TransportProtocol,
+    /// Canonical endpoint order (`endpoint_a` <= `endpoint_b`).
+    pub endpoint_a: FlowEndpoint,
+    /// Canonical endpoint order (`endpoint_b` >= `endpoint_a`).
+    pub endpoint_b: FlowEndpoint,
+    /// Lane corresponding to `endpoint_a`.
+    pub lane_a: PacketSequenceLane,
+    /// Lane corresponding to `endpoint_b`.
+    pub lane_b: PacketSequenceLane,
+    /// First known packet timestamp for the flow.
+    pub first_timestamp: Option<CaptureTimestamp>,
+    /// Last known packet timestamp for the flow.
+    pub last_timestamp: Option<CaptureTimestamp>,
+    /// All timeline messages in canonical input order.
+    pub messages: Box<[PacketSequenceMessage]>,
+}
+
+impl PacketSequenceTimeline {
+    /// Returns timeline entries for a time window with optional point budget.
+    ///
+    /// Time windows are in flow-relative offsets and preserve source packet IDs even
+    /// when aggregation is applied.
+    pub fn zoom(
+        &self,
+        start: Option<TcpFlowDuration>,
+        end: Option<TcpFlowDuration>,
+        max_points: Option<usize>,
+    ) -> Box<[PacketSequenceTimelineEntry]> {
+        let in_range_indices: Vec<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                if timeline_message_in_offset_range(message.relative_offset, start, end) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let Some(max_points) = max_points else {
+            return in_range_indices
+                .into_iter()
+                .map(|index| PacketSequenceTimelineEntry::Packet(self.messages[index]))
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+        };
+
+        if max_points == 0 {
+            return Vec::new().into_boxed_slice();
+        }
+        if in_range_indices.len() <= max_points {
+            return in_range_indices
+                .into_iter()
+                .map(|index| PacketSequenceTimelineEntry::Packet(self.messages[index]))
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+        }
+
+        let bucket_size = in_range_indices.len().div_ceil(max_points);
+        let mut output = Vec::new();
+        for chunk in in_range_indices.chunks(bucket_size) {
+            let first = self.messages[chunk[0]];
+            let last = self.messages[chunk[chunk.len() - 1]];
+            let mut total_packet_bytes = 0_u64;
+            let mut min_offset = first.relative_offset;
+            let mut max_offset = first.relative_offset;
+            for &index in chunk {
+                let message = self.messages[index];
+                total_packet_bytes =
+                    total_packet_bytes.saturating_add(u64::from(message.packet_size_bytes));
+                match (message.relative_offset, min_offset) {
+                    (Some(candidate), Some(current)) if candidate.ticks < current.ticks => {
+                        min_offset = Some(candidate)
+                    }
+                    (Some(_), None) => min_offset = message.relative_offset,
+                    (None, None) | (None, Some(_)) | (Some(_), Some(_)) => {}
+                }
+                match (message.relative_offset, max_offset) {
+                    (Some(candidate), Some(current)) if candidate.ticks > current.ticks => {
+                        max_offset = Some(candidate)
+                    }
+                    (Some(_), None) => max_offset = message.relative_offset,
+                    (None, None) | (None, Some(_)) | (Some(_), Some(_)) => {}
+                }
+            }
+            output.push(PacketSequenceTimelineEntry::Aggregate(
+                PacketSequenceAggregate {
+                    packet_count: chunk.len() as u64,
+                    first_packet: first.packet_id,
+                    last_packet: last.packet_id,
+                    first_packet_size_bytes: first.packet_size_bytes,
+                    last_packet_size_bytes: last.packet_size_bytes,
+                    total_packet_bytes,
+                    first_offset: first.relative_offset,
+                    last_offset: last.relative_offset,
+                    min_offset,
+                    max_offset,
+                },
+            ));
+        }
+
+        output.into_boxed_slice()
+    }
 }
 
 /// One deterministic bidirectional flow.
@@ -586,6 +779,72 @@ impl CaptureDataset {
         }
         Ok(output.into_boxed_slice())
     }
+
+    /// Reconstructs per-flow packet-sequence timelines from decoded fields.
+    ///
+    /// Output uses the same canonical flow key ordering used for bidirectional flow
+    /// reconstruction.
+    pub fn reconstruct_packet_sequence_timelines(
+        &self,
+    ) -> Result<Box<[PacketSequenceTimeline]>, FlowReconstructionError> {
+        let mut flows: BTreeMap<FlowKey, PacketSequenceTimelineAccumulator> = BTreeMap::new();
+
+        for packet in self.packets() {
+            let Some((key, direction)) = packet_flow_key(self, packet)? else {
+                continue;
+            };
+            let tcp = read_tcp_packet_data(self, packet)?;
+            let accumulator = flows.entry(key).or_default();
+            apply_packet_to_timeline(accumulator, packet, direction, tcp);
+        }
+
+        let mut output = Vec::new();
+        for (index, (key, mut accumulator)) in flows.into_iter().enumerate() {
+            let id = FlowId(
+                u32::try_from(index).map_err(|_| FlowReconstructionError::DatasetInvariant)?,
+            );
+            let first_timestamp = accumulator.flow.first_timestamp;
+            let last_timestamp = accumulator.flow.last_timestamp;
+
+            if let Some(flow_start) = first_timestamp {
+                for message in &mut accumulator.messages {
+                    if let Some(timestamp) = message.timestamp {
+                        message.relative_offset = duration_from_timestamps(flow_start, timestamp);
+                    }
+                }
+            }
+
+            let mut lane_a_indices = Vec::new();
+            let mut lane_b_indices = Vec::new();
+            for (index, message) in accumulator.messages.iter().enumerate() {
+                match message.direction {
+                    FlowDirection::AToB | FlowDirection::Unknown => lane_a_indices.push(index),
+                    FlowDirection::BToA => lane_b_indices.push(index),
+                }
+            }
+
+            output.push(PacketSequenceTimeline {
+                id,
+                interface_id: key.interface_id,
+                protocol: key.protocol,
+                endpoint_a: key.endpoint_a,
+                endpoint_b: key.endpoint_b,
+                lane_a: PacketSequenceLane {
+                    endpoint: key.endpoint_a,
+                    message_indices: lane_a_indices.into_boxed_slice(),
+                },
+                lane_b: PacketSequenceLane {
+                    endpoint: key.endpoint_b,
+                    message_indices: lane_b_indices.into_boxed_slice(),
+                },
+                first_timestamp,
+                last_timestamp,
+                messages: accumulator.messages.into_boxed_slice(),
+            });
+        }
+
+        Ok(output.into_boxed_slice())
+    }
 }
 
 fn apply_packet_to_flow(
@@ -800,6 +1059,33 @@ fn read_dns_packet_data(
         return Ok(DnsPacketData::default());
     }
     Ok(data)
+}
+
+fn apply_packet_to_timeline(
+    accumulator: &mut PacketSequenceTimelineAccumulator,
+    packet: &PacketRecord,
+    direction: FlowDirection,
+    tcp: TcpPacketData,
+) {
+    apply_packet_to_flow(&mut accumulator.flow, packet, direction);
+    let tcp_flags = if tcp.is_tcp {
+        Some(PacketSequenceFlags {
+            syn: tcp.syn,
+            ack: tcp.ack,
+            fin: tcp.fin,
+            rst: tcp.rst,
+        })
+    } else {
+        None
+    };
+    accumulator.messages.push(PacketSequenceMessage {
+        packet_id: packet.id,
+        relative_offset: None,
+        timestamp: packet.timestamp,
+        direction,
+        packet_size_bytes: packet.captured_length,
+        tcp_flags,
+    });
 }
 
 fn apply_tcp_packet_to_flow(
@@ -1114,6 +1400,30 @@ fn duration_from_timestamps(
         ticks: total_ticks,
         resolution: start.resolution(),
     })
+}
+
+fn timeline_message_in_offset_range(
+    offset: Option<TcpFlowDuration>,
+    start: Option<TcpFlowDuration>,
+    end: Option<TcpFlowDuration>,
+) -> bool {
+    let Some(offset) = offset else {
+        return true;
+    };
+
+    if let Some(start) = start {
+        if offset.resolution != start.resolution || offset.ticks < start.ticks {
+            return false;
+        }
+    }
+
+    if let Some(end) = end {
+        if offset.resolution != end.resolution || offset.ticks > end.ticks {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn packet_flow_key(
@@ -2848,6 +3158,193 @@ mod tests {
             flow.dns_response_latency,
             Some(TcpFlowDuration {
                 ticks: 250_000,
+                resolution: TimestampResolution::Decimal(6),
+            })
+        );
+    }
+
+    #[test]
+    fn reconstruct_packet_sequence_timelines_builds_directional_messages_and_lanes() {
+        let dataset = build_dataset(&[
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(55_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1_000),
+                    acknowledgment_number: Some(0),
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 250_000)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 55_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(2_000),
+                    acknowledgment_number: Some(1_001),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 500_000)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(55_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1_001),
+                    acknowledgment_number: Some(2_001),
+                    syn: false,
+                    ack: true,
+                    fin: true,
+                    rst: false,
+                }),
+            },
+        ]);
+        let timelines = dataset
+            .reconstruct_packet_sequence_timelines()
+            .expect("timeline reconstruction succeeds");
+        assert_eq!(timelines.len(), 1);
+        let timeline = &timelines[0];
+
+        assert_eq!(timeline.protocol, TransportProtocol::Tcp);
+        assert_eq!(timeline.messages.len(), 3);
+        assert_eq!(
+            timeline.lane_a.message_indices,
+            vec![0, 2].into_boxed_slice()
+        );
+        assert_eq!(timeline.lane_b.message_indices, vec![1].into_boxed_slice());
+
+        assert_eq!(timeline.messages[0].packet_id, PacketId(0));
+        assert_eq!(
+            timeline.messages[0].relative_offset,
+            Some(TcpFlowDuration {
+                ticks: 0,
+                resolution: TimestampResolution::Decimal(6)
+            })
+        );
+        assert_eq!(
+            timeline.messages[0].tcp_flags,
+            Some(PacketSequenceFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false
+            })
+        );
+        assert_eq!(
+            timeline.messages[1].tcp_flags,
+            Some(PacketSequenceFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false
+            })
+        );
+        assert_eq!(
+            timeline.messages[2].tcp_flags,
+            Some(PacketSequenceFlags {
+                syn: false,
+                ack: true,
+                fin: true,
+                rst: false
+            })
+        );
+    }
+
+    #[test]
+    fn reconstruct_packet_sequence_timelines_zoom_aggregates_long_flow() {
+        let mut packets = Vec::new();
+        for index in 0..6 {
+            packets.push(PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(index, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 3], [10, 0, 0, 4]),
+                transport: Some(TransportSpec::Udp(53, 53)),
+                tcp: None,
+            });
+        }
+        let dataset = build_dataset(&packets);
+        let timelines = dataset
+            .reconstruct_packet_sequence_timelines()
+            .expect("timeline reconstruction succeeds");
+        assert_eq!(timelines.len(), 1);
+        let timeline = &timelines[0];
+        let entries = timeline.zoom(None, None, Some(2));
+        assert_eq!(entries.len(), 2);
+        match &entries[0] {
+            PacketSequenceTimelineEntry::Aggregate(aggregate) => {
+                assert_eq!(aggregate.packet_count, 3);
+                assert_eq!(aggregate.first_packet, PacketId(0));
+                assert_eq!(aggregate.last_packet, PacketId(2));
+                assert_eq!(aggregate.first_packet_size_bytes, 32);
+                assert_eq!(aggregate.total_packet_bytes, 96);
+                assert_eq!(
+                    aggregate.first_offset,
+                    Some(TcpFlowDuration {
+                        ticks: 0,
+                        resolution: TimestampResolution::Decimal(6),
+                    })
+                );
+                assert_eq!(
+                    aggregate.last_offset,
+                    Some(TcpFlowDuration {
+                        ticks: 2_000_000,
+                        resolution: TimestampResolution::Decimal(6),
+                    })
+                );
+            }
+            _ => panic!("expected aggregate"),
+        }
+        match &entries[1] {
+            PacketSequenceTimelineEntry::Aggregate(aggregate) => {
+                assert_eq!(aggregate.packet_count, 3);
+                assert_eq!(aggregate.first_packet, PacketId(3));
+                assert_eq!(aggregate.last_packet, PacketId(5));
+                assert_eq!(aggregate.total_packet_bytes, 96);
+            }
+            _ => panic!("expected aggregate"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_packet_sequence_timelines_handles_missing_packet_timestamps() {
+        let dataset = build_dataset(&[
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: None,
+                network: NetworkSpec::V4([10, 0, 0, 5], [10, 0, 0, 6]),
+                transport: Some(TransportSpec::Udp(1000, 2000)),
+                tcp: None,
+            },
+            PacketSpec {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(10, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 5], [10, 0, 0, 6]),
+                transport: Some(TransportSpec::Udp(1000, 2000)),
+                tcp: None,
+            },
+        ]);
+        let timelines = dataset
+            .reconstruct_packet_sequence_timelines()
+            .expect("timeline reconstruction succeeds");
+        assert_eq!(timelines.len(), 1);
+        let timeline = &timelines[0];
+        assert_eq!(timeline.messages[0].timestamp, None);
+        assert_eq!(timeline.messages[0].relative_offset, None);
+        assert_eq!(timeline.messages[1].timestamp, Some(timestamp(10, 0)));
+        assert_eq!(
+            timeline.messages[1].relative_offset,
+            Some(TcpFlowDuration {
+                ticks: 0,
                 resolution: TimestampResolution::Decimal(6),
             })
         );
