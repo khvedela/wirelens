@@ -30,9 +30,28 @@ IPv6 jumbograms stop at a visible structured unsupported marker. Recursive IP-in
 routing-header final-destination semantics, and IPsec processing are deferred rather than guessed.
 
 Numeric IPv4 Protocol and terminal IPv6 Next Header selectors reach a single bounded handoff with
-exact captured payload evidence, declared length, and fragment position. TCP, UDP, ICMP, ICMPv6,
-and DNS are intentionally left uninterpreted until their later Epic 3 issues; no transport layer is
-claimed merely from an IP selector or port-shaped bytes.
+exact captured payload evidence, declared length, fragment position, and borrowed source/destination
+address evidence for checksum validation.
+
+### Transport and control protocols
+
+| Input | Decoded facts | Current boundary |
+| --- | --- | --- |
+| TCP (`6`) | Ports, sequence and acknowledgement numbers, data offset, reserved bits, numeric and individual flags, window, checksum, urgent pointer | Header length 20–60 bytes; options remain inside the data-offset-bounded header |
+| TCP options | EOL, NOP, MSS, Window Scale, SACK Permitted, SACK blocks, Timestamp, and generic unknown type/length/data | At most 40 option bytes and 40 option items; known option lengths are validated |
+| UDP (`17`) | Ports, datagram length, checksum, and exact application-payload handoff | Length must be at least eight bytes and cannot exceed the enclosing network payload; shorter UDP framing leaves trailing network bytes uninterpreted |
+| ICMP (`1`) and ICMPv6 (`58`) | Type, code, checksum, and bounded common echo/error body fields | Embedded quoted packets are retained as packet bytes and are not recursively decoded |
+
+Dispatch is family-specific: protocol `1` means ICMP only in IPv4 and selector `58` means ICMPv6
+only in IPv6. TCP and UDP are accepted for either family. Numeric selectors outside this set remain
+uninterpreted; a decoder is never guessed from payload shape or port numbers. DNS remains deferred
+to its dedicated Epic 3 issue.
+
+Non-initial fragments never reach a transport decoder. A first fragment may expose a transport
+header that is present in that fragment, but it does not produce a complete application-payload
+handoff or checksum verdict. IPv6 atomic fragments are complete checksum domains. No fragment
+reassembly, TCP stream reassembly, congestion-state inference, application decoding, or
+conversation-state conclusion is performed here.
 
 ## Evidence and recovery rules
 
@@ -41,11 +60,17 @@ claimed merely from an IP selector or port-shaped bytes.
   payload buffers.
 - Truncated or contradictory headers produce structured packet diagnostics and stop only the
   affected protocol path. Capture framing remains available.
-- A network path emits at most one prioritized diagnostic. Actionable length, structure, and
+- A network-through-transport path emits at most one prioritized diagnostic. Actionable length, structure, and
   truncation conditions outrank checksum caveats so hostile packets cannot exhaust the diagnostic
   arena with one warning per failed check.
 - IPv4 header checksum validity is evidence metadata, not a certainty claim. An invalid value emits
   a warning that explicitly notes capture offload as a possible explanation.
+- TCP, UDP, ICMP, and ICMPv6 checksum validity is emitted only when the complete captured checksum
+  domain is available and structurally sound. TCP, UDP, and ICMPv6 include the IP pseudo-header.
+  IPv4 UDP checksum zero is represented as absent; ordinary IPv6 UDP checksum zero is flagged.
+  IPv4 source-route options and traversed IPv6 Routing headers make the effective destination
+  ambiguous, so WireLens deliberately omits a checksum verdict instead of presenting false
+  certainty. Invalid transport checksum warnings also name capture offload as a possible cause.
 - Reaching an IPv6 traversal cap emits a visible unsupported-chain marker and a resource-limit
   warning. ESP is visible but terminal because its protected remainder, trailer, and Next Header
   semantics depend on security-association state that is outside the decoder.
@@ -68,6 +93,6 @@ lengths and type values, synthetic PCAP/PCAPNG integration tests, fuzz-corpus re
 directional benchmark. The committed corpora are generated test data under the repository license;
 their construction and hashes are documented in the
 [link decoder fixture manifest](../fixtures/manifests/protocol-decode-fuzz-corpus.md) and focused
-[network decoder fixture manifest](../fixtures/manifests/network-decode-fuzz-corpus.md).
+[network/transport decoder fixture manifest](../fixtures/manifests/network-decode-fuzz-corpus.md).
 
 No private, proprietary, or captured network traffic is accepted as a test fixture.

@@ -219,7 +219,7 @@ fn has_diagnostic(dataset: &CaptureDataset, code: DiagnosticCode) -> bool {
 
 #[test]
 fn decodes_ipv4_fixed_header_fragment_metadata_and_checksum() {
-    let packet = ethernet(0x0800, &ipv4(&[], &[0; 8], 17, 0x2000, None));
+    let packet = ethernet(0x0800, &ipv4(&[], &[0; 8], 253, 0x2000, None));
     let dataset = decode(&packet);
 
     assert_eq!(names(&dataset), ["ethernet", "ipv4"]);
@@ -247,7 +247,7 @@ fn decodes_ipv4_fixed_header_fragment_metadata_and_checksum() {
     );
     assert_eq!(
         one_field(&dataset, "protocol").value,
-        FieldValue::Unsigned(17)
+        FieldValue::Unsigned(253)
     );
     assert_eq!(
         one_field(&dataset, "more_fragments").value,
@@ -274,7 +274,7 @@ fn decodes_ipv4_fixed_header_fragment_metadata_and_checksum() {
 #[test]
 fn decodes_bounded_ipv4_options_in_wire_order() {
     let options = [1, 0x82, 4, 0xaa, 0, 0, 0, 0];
-    let dataset = decode(&ethernet(0x0800, &ipv4(&options, &[], 6, 0, None)));
+    let dataset = decode(&ethernet(0x0800, &ipv4(&options, &[], 253, 0, None)));
 
     assert_eq!(names(&dataset), ["ethernet", "ipv4"]);
     assert!(dataset.diagnostics().is_empty());
@@ -306,18 +306,14 @@ fn advertised_global_field_and_child_ceilings_cover_ipv4_options() {
     for _ in 0..20 {
         options.extend([0x1e, 2]);
     }
-    let dataset = decode(&vlan(0x0800, &ipv4(&options, &[], 6, 0, None)));
+    let dataset = decode(&vlan(0x0800, &ipv4(&options, &[], 253, 0, None)));
 
     assert_eq!(names(&dataset), ["ethernet", "vlan", "ipv4"]);
     assert!(dataset.diagnostics().is_empty());
-    assert_eq!(
-        dataset.fields().len(),
-        DECODER_MAX_FIELDS_PER_PACKET as usize
-    );
-    assert_eq!(
-        dataset.field_children().len(),
-        DECODER_MAX_FIELD_CHILDREN_PER_PACKET as usize
-    );
+    assert_eq!(dataset.fields().len(), 91);
+    assert_eq!(dataset.field_children().len(), 88);
+    assert!(dataset.fields().len() <= DECODER_MAX_FIELDS_PER_PACKET as usize);
+    assert!(dataset.field_children().len() <= DECODER_MAX_FIELD_CHILDREN_PER_PACKET as usize);
     assert!(dataset.layers().len() <= DECODER_MAX_LAYERS_PER_PACKET as usize);
     assert_eq!(fields_named(&dataset, "ipv4_option").count(), 20);
     assert_eq!(fields_named(&dataset, "option_type").count(), 20);
@@ -327,7 +323,7 @@ fn advertised_global_field_and_child_ceilings_cover_ipv4_options() {
 
 #[test]
 fn every_ipv4_header_cutoff_is_truncated_without_invalid_ranges() {
-    let fixed = ethernet(0x0800, &ipv4(&[], &[], 6, 0, None));
+    let fixed = ethernet(0x0800, &ipv4(&[], &[], 253, 0, None));
     for captured_header_length in 0..20 {
         let dataset = decode(&fixed[..14 + captured_header_length]);
         assert_eq!(names(&dataset), ["ethernet", "ipv4"]);
@@ -335,7 +331,7 @@ fn every_ipv4_header_cutoff_is_truncated_without_invalid_ranges() {
         assert_all_ranges_within_packet(&dataset);
     }
 
-    let with_options = ethernet(0x0800, &ipv4(&[1; 8], &[], 6, 0, None));
+    let with_options = ethernet(0x0800, &ipv4(&[1; 8], &[], 253, 0, None));
     for captured_header_length in 20..28 {
         let dataset = decode(&with_options[..14 + captured_header_length]);
         assert_eq!(names(&dataset), ["ethernet", "ipv4"]);
@@ -403,14 +399,14 @@ fn malformed_version_lengths_options_and_fragments_are_distinguished() {
 
 #[test]
 fn payload_truncation_outranks_checksum_warning_and_checksum_message_is_safe() {
-    let truncated = decode(&ethernet(0x0800, &ipv4(&[], &[], 17, 0, Some(100))));
+    let truncated = decode(&ethernet(0x0800, &ipv4(&[], &[], 253, 0, Some(100))));
     assert_eq!(truncated.diagnostics().len(), 1);
     assert_eq!(
         truncated.diagnostics()[0].code,
         DiagnosticCode::TRUNCATED_PROTOCOL
     );
 
-    let mut damaged = ipv4(&[], &[], 17, 0, None);
+    let mut damaged = ipv4(&[], &[], 253, 0, None);
     damaged[10] ^= 0xff;
     let damaged = decode(&ethernet(0x0800, &damaged));
     assert_eq!(damaged.diagnostics().len(), 1);

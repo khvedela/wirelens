@@ -23,3 +23,7 @@ harness = false
 [[bench]]
 name = "network_layer_decode"
 harness = false
+
+[[bench]]
+name = "transport_layer_decode"
+harness = false

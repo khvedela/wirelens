@@ -1,6 +1,6 @@
 # Browser-ingestion evidence
 
-Recorded 2026-07-26T23:29:06.282Z from the production bundle in full Chromium 150.0.7871.184. The fixture generator created only deterministic synthetic traffic in temporary storage; its runtime manifest SHA-256 was `e1aa31de024f9016fc4d5d936f9609a7df37e37760a1c3c3cdefb439a60cea65`.
+Recorded 2026-07-27T00:25:08.026Z from the production bundle in full Chromium 151.0.7922.34. The fixture generator created only deterministic synthetic traffic in temporary storage; its runtime manifest SHA-256 was `e1aa31de024f9016fc4d5d936f9609a7df37e37760a1c3c3cdefb439a60cea65`.
 
 > This is the supported v1 path at exactly 250,613,512 bytes (239.00 MiB), below the accepted 256 MiB boundary. It does not satisfy or redefine ADR-0001's successful `>=500 MB` path. The separate sparse 500 MiB scenario proves pre-read rejection only.
 
@@ -10,26 +10,26 @@ Recorded 2026-07-26T23:29:06.282Z from the production bundle in full Chromium 15
 | --- | --- |
 | Host | Apple M3 Pro; 11 logical CPUs; 18 GiB RAM |
 | Platform | darwin / arm64 |
-| Browser | Full Chromium 150.0.7871.184, cross-origin isolated |
+| Browser | Full Chromium 151.0.7922.34, cross-origin isolated |
 | Fixture | 250,613,512 bytes, 1048576-byte synthetic payload records |
 | Build | Pinned production Vite module-worker bundle; local Wasm asset |
-| Source base revision | `2985b355a7e82aec06a9fbc48dc160e2e3d4a396` |
-| Source-tree SHA-256 | `08fb5a6a1968705766af908a4ca0e2341cb3eaa2cb9efb8bdaa3def350666877` |
+| Source base revision | `655ff2b9596e30494b6d93fe257a8dcf1c8a4639` |
+| Source-tree SHA-256 | `dc45a043ba31dc3ac53955cbd8413f34348ccb94a63d3eca34589c67eb9730ea` |
 
 ## Quantitative supported-path result
 
 | Measurement | Result | Gate | Status |
 | --- | ---: | ---: | --- |
-| Effective file-read + ingest + index throughput | 297.39 MiB/s | >=50 MiB/s | pass |
+| Effective file-read + ingest + index throughput | 292.07 MiB/s | >=50 MiB/s | pass |
 | Main-thread long tasks over 50 ms | 0 | 0 | pass |
-| Main-thread heartbeat ticks during import | 202 | >0 | pass |
-| Cancellation acknowledgement samples | 4.22, 6.77, 12.55, 6.30, 4.95, 6.42 ms | reading + parsing | pass |
-| Cancellation acknowledgement median | 6.36 ms | <=200 ms | pass |
-| Sampled attributable agent-cluster memory high-water | 1.04x input | <=2.5x | pass |
+| Main-thread heartbeat ticks during import | 209 | >0 | pass |
+| Cancellation acknowledgement samples | 4.21, 6.79, 9.40, 6.49, 5.89, 6.35 ms | reading + parsing | pass |
+| Cancellation acknowledgement median | 6.42 ms | <=200 ms | pass |
+| Sampled attributable agent-cluster memory high-water | 1.02x input | <=2.5x | pass |
 | Product-path source-modeled allocation envelope | 2.02x input | <=2.5x | pass |
 | Worker-to-main binary response | 0 bytes | <=8 MiB | pass |
 
-Chromium memory used `measureUserAgentSpecificMemory` across 31 agent-cluster samples. Idle baseline was 3,715,921 bytes; sampled absolute high-water was 263,322,744 bytes; attributable growth was 259,606,823 bytes. Because an asynchronous sampler cannot interrupt the worker's synchronous JavaScript-to-Wasm copy, the product-path model separately takes the maximum of: read assembly (254,807,816 bytes), the whole-input JavaScript-to-Rust overlap plus one admitted 4,194,304-byte slice (505,421,328 bytes), and the sampled parser logical upper bound (350,700,554 bytes). The resulting 505,421,328-byte envelope is 2.02x the exact input. The worker releases its chunk-assembled JavaScript input reference immediately after the admitted Wasm copy returns.
+Chromium memory used `measureUserAgentSpecificMemory` across 32 agent-cluster samples. Idle baseline was 3,693,453 bytes; sampled absolute high-water was 259,286,728 bytes; attributable growth was 255,593,275 bytes. Because an asynchronous sampler cannot interrupt the worker's synchronous JavaScript-to-Wasm copy, the product-path model separately takes the maximum of: read assembly (254,807,816 bytes), the whole-input JavaScript-to-Rust overlap plus one admitted 4,194,304-byte slice (505,421,328 bytes), and the sampled parser logical upper bound (350,703,370 bytes). The resulting 505,421,328-byte envelope is 2.02x the exact input. The worker releases its chunk-assembled JavaScript input reference immediately after the admitted Wasm copy returns.
 
 ## Privacy and cleanup
 

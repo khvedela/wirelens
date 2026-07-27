@@ -1940,14 +1940,15 @@ mod tests {
 
     fn maximal_ipv4_field_decode() -> Vec<u8> {
         const IPV4_HEADER_LENGTH: usize = 60;
+        const TCP_HEADER_LENGTH: usize = 60;
 
         let mut frame = vlan_header(0x0800);
         let ipv4_start = frame.len();
         frame.extend([0x4f, 0x00]);
-        frame.extend(60_u16.to_be_bytes());
+        frame.extend(120_u16.to_be_bytes());
         frame.extend(0x1234_u16.to_be_bytes());
         frame.extend(0_u16.to_be_bytes());
-        frame.extend([64, 253]);
+        frame.extend([64, 6]);
         frame.extend(0_u16.to_be_bytes());
         frame.extend([192, 0, 2, 1]);
         frame.extend([198, 51, 100, 2]);
@@ -1957,10 +1958,70 @@ mod tests {
             frame.extend([0x1e, 2]);
         }
         assert_eq!(frame.len(), ipv4_start + IPV4_HEADER_LENGTH);
-        let checksum = ipv4_checksum(&frame[ipv4_start..]);
+        let checksum = ipv4_checksum(&frame[ipv4_start..ipv4_start + IPV4_HEADER_LENGTH]);
         frame[ipv4_start + 10..ipv4_start + 12].copy_from_slice(&checksum.to_be_bytes());
-        assert_eq!(ipv4_checksum(&frame[ipv4_start..]), 0);
+        assert_eq!(
+            ipv4_checksum(&frame[ipv4_start..ipv4_start + IPV4_HEADER_LENGTH]),
+            0
+        );
+
+        let tcp_start = frame.len();
+        frame.extend(12_345_u16.to_be_bytes());
+        frame.extend(443_u16.to_be_bytes());
+        frame.extend(0x0102_0304_u32.to_be_bytes());
+        frame.extend(0x0506_0708_u32.to_be_bytes());
+        frame.extend([0xf0, 0xff]);
+        frame.extend(4_096_u16.to_be_bytes());
+        frame.extend(0_u16.to_be_bytes());
+        frame.extend(0_u16.to_be_bytes());
+        for _ in 0..20 {
+            // A generic two-byte option maximizes structured option fields
+            // within TCP's 40-byte data-offset-bounded option area.
+            frame.extend([0x1e, 2]);
+        }
+        assert_eq!(frame.len(), tcp_start + TCP_HEADER_LENGTH);
+        let tcp_checksum = ipv4_transport_checksum(
+            &frame[ipv4_start + 12..ipv4_start + 16],
+            &frame[ipv4_start + 16..ipv4_start + 20],
+            6,
+            &frame[tcp_start..],
+        );
+        frame[tcp_start + 16..tcp_start + 18].copy_from_slice(&tcp_checksum.to_be_bytes());
+        assert_eq!(
+            ipv4_transport_checksum(
+                &frame[ipv4_start + 12..ipv4_start + 16],
+                &frame[ipv4_start + 16..ipv4_start + 20],
+                6,
+                &frame[tcp_start..],
+            ),
+            0
+        );
         frame
+    }
+
+    fn ipv4_transport_checksum(
+        source: &[u8],
+        destination: &[u8],
+        protocol: u8,
+        message: &[u8],
+    ) -> u16 {
+        let length = u16::try_from(message.len())
+            .expect("synthetic transport message length fits u16")
+            .to_be_bytes();
+        let protocol = [0, protocol];
+        let mut sum = 0_u32;
+        for bytes in [source, destination, &protocol, &length, message] {
+            for pair in bytes.chunks_exact(2) {
+                sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
+            }
+            if let Some(&last) = bytes.chunks_exact(2).remainder().first() {
+                sum += u32::from(last) << 8;
+            }
+        }
+        while sum > u32::from(u16::MAX) {
+            sum = (sum & u32::from(u16::MAX)) + (sum >> 16);
+        }
+        !u16::try_from(sum).expect("folded checksum fits u16")
     }
 
     fn maximal_ipv6_layer_decode() -> Vec<u8> {
@@ -2261,7 +2322,7 @@ mod tests {
         let children_per_packet =
             usize::try_from(DECODER_MAX_FIELD_CHILDREN_PER_PACKET).expect("child count fits usize");
         assert_eq!(dataset.packets().len(), packet_count);
-        assert_eq!(dataset.layers().len(), packet_count * 3);
+        assert_eq!(dataset.layers().len(), packet_count * 4);
         assert_eq!(dataset.fields().len(), packet_count * fields_per_packet);
         assert_eq!(
             dataset.field_children().len(),
@@ -2272,7 +2333,7 @@ mod tests {
             dataset
                 .packets()
                 .iter()
-                .all(|packet| packet.layers.length() == 3)
+                .all(|packet| packet.layers.length() == 4)
         );
     }
 

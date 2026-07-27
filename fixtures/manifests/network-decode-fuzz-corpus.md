@@ -1,4 +1,4 @@
-# Network decoder fuzz corpus provenance
+# Network and transport decoder fuzz corpus provenance
 
 - **Created:** 2026-07-26
 - **Source:** WireLens-authored, deterministic synthetic byte sequences. No observed, captured,
@@ -41,10 +41,15 @@ mutation:
 | `fuzz/corpus/network_decode/ipv6-extension-truncated.hex` | IPv6 declares an eight-byte Routing header but only four bytes were captured. | Diagnose truncation and stop traversal at the captured boundary. | `4fbcf2eb07415cbf448244e0c3c444202e52f63b58928e94e3830947a0af5bf1` |
 | `fuzz/corpus/network_decode/ipv6-fragment.hex` | IPv6 non-initial fragment with offset one, More Fragments set, and an authored identifier. | Expose fragment metadata, stop further next-header traversal, and perform no reassembly. | `79e7a40c8fcdb58a89cf2f24910609f21e33e5318bc275f3965755dbe0731460` |
 | `fuzz/corpus/network_decode/ipv6-extension-depth-limit.hex` | IPv6 contains nine chained Destination Options headers. | Decode eight headers, then emit the bounded unsupported-chain marker and `RESOURCE_LIMIT` warning at the ninth selector. | `3253e141e9d9f2e21218cc72878f212f02c43812bce71779d618a35513ff80f5` |
+| `fuzz/corpus/network_decode/tcp-options-valid.hex` | IPv4/TCP header with valid checksums and a 20-byte sequence of MSS, NOP, Window Scale, SACK Permitted, and Timestamp options. | Traverse only the data-offset-bounded option area and retain each common option without allocating from attacker-controlled lengths. | `e4fb67471217177f5a88617b7eb1f34c26a09fc28ec0df14f67956fa1c7b97d1` |
+| `fuzz/corpus/network_decode/tcp-options-malformed.hex` | IPv4/TCP header whose MSS option declares the invalid length three. | Retain bounded option evidence, emit one structured malformed finding, continue only within the data-offset-bounded header, and suppress checksum/application handoff. | `0c307512d94b0043c907b9721699189a9173176a885779ae46e627cbc48d5935` |
+| `fuzz/corpus/network_decode/udp-length-invalid.hex` | IPv4/UDP header whose UDP length is 65,535 inside an eight-byte network payload. | Reject the enclosing-length contradiction without using bytes outside the IP payload or allocating from the declared UDP length. | `f2753efd23150a1bc7e8cb971b5652232abc7aa1f6bee70e6e5f96b14b847f45` |
 
 The target constructs one valid Ethernet packet inside either legacy PCAP or PCAPNG, exercises an
-early cancellation, and separately drives the same bounded packet to a terminal result. Successful
-imports must validate the canonical dataset, keep every layer, field, byte value, and diagnostic
-range within the packet, and stay within the decoder-wide layer, field, child-reference, vocabulary,
+early cancellation, and separately drives the same bounded packet to a terminal result. Valid IP
+seeds reach TCP, UDP, ICMP, and ICMPv6 through the same production handoff, so mutations exercise
+transport lengths and option traversal without a second parser implementation. Successful imports
+must validate the canonical dataset, keep every layer, field, byte value, and diagnostic range
+within the packet, and stay within the decoder-wide layer, field, child-reference, vocabulary,
 diagnostic, string, capture, and block ceilings. Corpus replay is per-PR smoke protection; scheduled
 mutation campaigns provide the deeper hostile-input search.
