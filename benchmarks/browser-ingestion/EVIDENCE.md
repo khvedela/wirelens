@@ -1,6 +1,6 @@
 # Browser-ingestion evidence
 
-Recorded 2026-07-27T02:02:33.444Z from the production bundle in full Chromium 151.0.7922.34. The fixture generator created only deterministic synthetic traffic in temporary storage; its runtime manifest SHA-256 was `e1aa31de024f9016fc4d5d936f9609a7df37e37760a1c3c3cdefb439a60cea65`.
+Recorded 2026-07-27T21:06:08.263Z from the production bundle in full Chromium 151.0.7922.34. The fixture generator created only deterministic synthetic traffic in temporary storage; its runtime manifest SHA-256 was `4519224de45927eab70f88a76f2761772835f679014cbaefef7ab28a98bc1330`.
 
 > This is the supported v1 path at exactly 250,613,512 bytes (239.00 MiB), below the accepted 256 MiB boundary. It does not satisfy or redefine ADR-0001's successful `>=500 MB` path. The separate sparse 500 MiB scenario proves pre-read rejection only.
 
@@ -13,23 +13,23 @@ Recorded 2026-07-27T02:02:33.444Z from the production bundle in full Chromium 15
 | Browser | Full Chromium 151.0.7922.34, cross-origin isolated |
 | Fixture | 250,613,512 bytes, 1048576-byte synthetic payload records |
 | Build | Pinned production Vite module-worker bundle; local Wasm asset |
-| Source base revision | `a4c0b9d9c98c38bf3dc521a3bec7c0be2c67c92d` |
-| Source-tree SHA-256 | `af09cf8a2094577db6fa358e13b71e89be0e4ab5b670df9f0e2fddebe9413c7e` |
+| Source base revision | `625b695bb9e980f4dbac41248e125cb667a60844` |
+| Source-tree SHA-256 | `c72250e51308c885f69127e1a9d8bb37b1088c92bb49f5519d37eea4edd17327` |
 
 ## Quantitative supported-path result
 
 | Measurement | Result | Gate | Status |
 | --- | ---: | ---: | --- |
-| Effective file-read + ingest + index throughput | 294.08 MiB/s | >=50 MiB/s | pass |
+| Effective file-read + ingest + index throughput | 293.68 MiB/s | >=50 MiB/s | pass |
 | Main-thread long tasks over 50 ms | 0 | 0 | pass |
-| Main-thread heartbeat ticks during import | 209 | >0 | pass |
-| Cancellation acknowledgement samples | 4.53, 6.69, 8.36, 4.80, 5.16, 7.06 ms | reading + parsing | pass |
-| Cancellation acknowledgement median | 5.92 ms | <=200 ms | pass |
+| Main-thread heartbeat ticks during import | 197 | >0 | pass |
+| Cancellation acknowledgement samples | 3.23, 6.59, 10.31, 6.20, 7.03, 6.33 ms | reading + parsing | pass |
+| Cancellation acknowledgement median | 6.46 ms | <=200 ms | pass |
 | Sampled attributable agent-cluster memory high-water | 1.02x input | <=2.5x | pass |
 | Product-path source-modeled allocation envelope | 2.02x input | <=2.5x | pass |
 | Worker-to-main binary response | 0 bytes | <=8 MiB | pass |
 
-Chromium memory used `measureUserAgentSpecificMemory` across 31 agent-cluster samples. Idle baseline was 4,226,170 bytes; sampled absolute high-water was 259,294,358 bytes; attributable growth was 255,068,188 bytes. Because an asynchronous sampler cannot interrupt the worker's synchronous JavaScript-to-Wasm copy, the product-path model separately takes the maximum of: read assembly (254,807,816 bytes), the whole-input JavaScript-to-Rust overlap plus one admitted 4,194,304-byte slice (505,421,328 bytes), and the sampled parser logical upper bound (362,237,706 bytes). The resulting 505,421,328-byte envelope is 2.02x the exact input. The worker releases its chunk-assembled JavaScript input reference immediately after the admitted Wasm copy returns.
+Chromium memory used `measureUserAgentSpecificMemory` across 31 agent-cluster samples. Idle baseline was 3,927,982 bytes; sampled absolute high-water was 259,751,116 bytes; attributable growth was 255,823,134 bytes. Because an asynchronous sampler cannot interrupt the worker's synchronous JavaScript-to-Wasm copy, the product-path model separately takes the maximum of: read assembly (254,807,816 bytes), the whole-input JavaScript-to-Rust overlap plus one admitted 4,194,304-byte slice (505,421,328 bytes), and the sampled parser logical upper bound (362,237,706 bytes). The resulting 505,421,328-byte envelope is 2.02x the exact input. The worker releases its chunk-assembled JavaScript input reference immediately after the admitted Wasm copy returns.
 
 ## Privacy and cleanup
 
