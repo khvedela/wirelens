@@ -1,4 +1,11 @@
 //! Bidirectional flow reconstruction for already-decoded protocol layers.
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::restriction,
+    clippy::nursery,
+    clippy::cargo
+)]
 
 use std::collections::BTreeMap;
 
