@@ -6,6 +6,11 @@ import init, {
 } from "./generated/wirelens_wasm_boundary.js";
 import { validatePacketBatch } from "./packet-batch";
 import {
+  MAX_PACKET_DETAIL_BYTES,
+  PACKET_DETAIL_SCHEMA_VERSION,
+  validatePacketDetail,
+} from "./packet-detail";
+import {
   cancellationPhaseIsTerminal,
   exactU64IsPositive,
   importStateMatchesPhase,
@@ -69,6 +74,7 @@ interface PendingPacketBatch {
   schemaVersion: number;
   startRow: bigint;
 }
+
 type RuntimeCommand<T> = T extends unknown ? Omit<T, "requestId"> : never;
 type BoundaryRuntimeCommand = RuntimeCommand<BoundaryRequest>;
 const MAX_OUTSTANDING_TRANSFERS = 1;
@@ -218,6 +224,7 @@ function normalizeCapabilities(value: unknown): Capabilities {
     "packetAdmissionBytesPerPacket",
   ] as const;
   const optionalPositiveIntegerKeys = [
+    "detailSchemaVersion",
     "decodedFieldAdmissionBase",
     "decodedFieldAdmissionBytesPerItem",
     "decodedLayerAdmissionBase",
@@ -226,10 +233,13 @@ function normalizeCapabilities(value: unknown): Capabilities {
     "fieldChildAdmissionBytesPerItem",
     "maxFieldChildren",
     "maxFieldChildrenPerPacket",
+    "maxCorrelationMatches",
     "maxFields",
     "maxFieldsPerPacket",
     "maxLayers",
     "maxLayersPerPacket",
+    "maxPacketDetailBytes",
+    "maxPacketEvidenceBytes",
   ] as const;
   const normalized = Object.fromEntries(
     positiveIntegerKeys.map((key) => [
@@ -252,6 +262,37 @@ function normalizeCapabilities(value: unknown): Capabilities {
     throw new BoundaryProtocolError(
       "internal_invariant",
       "Wasm capability versions are inconsistent",
+    );
+  }
+  const inspectionCapabilityKeys = [
+    "detailSchemaVersion",
+    "maxCorrelationMatches",
+    "maxPacketDetailBytes",
+    "maxPacketEvidenceBytes",
+  ] as const;
+  const inspectionCapabilityCount = inspectionCapabilityKeys.filter(
+    (key) => optionalIntegers[key] !== undefined,
+  ).length;
+  if (
+    inspectionCapabilityCount !== 0 &&
+    inspectionCapabilityCount !== inspectionCapabilityKeys.length
+  ) {
+    throw new BoundaryProtocolError(
+      "internal_invariant",
+      "Wasm packet-inspection capabilities are incomplete",
+    );
+  }
+  if (
+    inspectionCapabilityCount !== 0 &&
+    (optionalIntegers.detailSchemaVersion !== PACKET_DETAIL_SCHEMA_VERSION ||
+      (optionalIntegers.maxPacketDetailBytes ?? 0) > MAX_PACKET_DETAIL_BYTES ||
+      (optionalIntegers.maxPacketEvidenceBytes ?? 0) > normalized.maxEvidenceBytes ||
+      (optionalIntegers.maxCorrelationMatches ?? 0) >
+        (optionalIntegers.maxFieldsPerPacket ?? Number.MAX_SAFE_INTEGER))
+  ) {
+    throw new BoundaryProtocolError(
+      "internal_invariant",
+      "Wasm packet-inspection capabilities are inconsistent",
     );
   }
   const decodedArenaAdmissionRule = property(value, "decodedArenaAdmissionRule");
@@ -480,6 +521,45 @@ function canonicalHandle(value: unknown): bigint {
   return value;
 }
 
+function exactByteArray(value: unknown, maximum: number, label: string): Uint8Array {
+  if (
+    !(value instanceof Uint8Array) ||
+    !(value.buffer instanceof ArrayBuffer) ||
+    value.byteOffset !== 0 ||
+    value.byteLength !== value.buffer.byteLength ||
+    value.byteLength > maximum
+  ) {
+    throw new BoundaryProtocolError("internal_invariant", `Wasm returned invalid ${label}`);
+  }
+  return value;
+}
+
+function exactFieldIds(value: unknown, maximum: number): Uint32Array {
+  if (
+    !(value instanceof Uint32Array) ||
+    !(value.buffer instanceof ArrayBuffer) ||
+    value.byteOffset !== 0 ||
+    value.byteLength !== value.buffer.byteLength ||
+    value.length > maximum
+  ) {
+    throw new BoundaryProtocolError(
+      "internal_invariant",
+      "Wasm returned invalid correlated field IDs",
+    );
+  }
+  const seen = new Set<number>();
+  for (const fieldId of value) {
+    if (seen.has(fieldId)) {
+      throw new BoundaryProtocolError(
+        "internal_invariant",
+        "Wasm returned duplicate correlated field IDs",
+      );
+    }
+    seen.add(fieldId);
+  }
+  return value;
+}
+
 async function initialize(): Promise<void> {
   initialization ??= init();
   await initialization;
@@ -538,6 +618,57 @@ export class BoundaryRuntime {
       apiVersion,
       handle,
       operation: "cancel_import",
+    });
+  }
+
+  readPacketDetail(
+    datasetHandle: bigint,
+    packetId: number,
+    detailSchemaVersion: number,
+    maxBytes: number,
+    apiVersion = BOUNDARY_API_VERSION,
+  ): Promise<Uint8Array> {
+    return this.#dispatchDirect<Uint8Array>({
+      apiVersion,
+      datasetHandle,
+      detailSchemaVersion,
+      maxBytes,
+      operation: "read_packet_detail",
+      packetId,
+    });
+  }
+
+  readPacketEvidence(
+    datasetHandle: bigint,
+    packetId: number,
+    relativeStart: number,
+    maxBytes: number,
+    apiVersion = BOUNDARY_API_VERSION,
+  ): Promise<Uint8Array> {
+    return this.#dispatchDirect<Uint8Array>({
+      apiVersion,
+      datasetHandle,
+      maxBytes,
+      operation: "read_packet_evidence",
+      packetId,
+      relativeStart,
+    });
+  }
+
+  correlatePacketRange(
+    datasetHandle: bigint,
+    packetId: number,
+    relativeStart: number,
+    length: number,
+    apiVersion = BOUNDARY_API_VERSION,
+  ): Promise<Uint32Array> {
+    return this.#dispatchDirect<Uint32Array>({
+      apiVersion,
+      datasetHandle,
+      length,
+      operation: "correlate_packet_range",
+      packetId,
+      relativeStart,
     });
   }
 
@@ -631,6 +762,60 @@ export class BoundaryRuntime {
           request.startHi,
           request.startLo,
           request.length,
+        );
+      }
+      case "read_packet_detail": {
+        this.#assertTransferCapacity();
+        const bytes = exactByteArray(
+          adapter.readPacketDetail(
+            canonicalHandle(request.datasetHandle),
+            request.packetId,
+            request.detailSchemaVersion,
+            request.maxBytes,
+          ),
+          Math.min(MAX_PACKET_DETAIL_BYTES, request.maxBytes),
+          "packet detail",
+        );
+        try {
+          validatePacketDetail(bytes, request.packetId);
+        } catch {
+          throw new BoundaryProtocolError(
+            "internal_invariant",
+            "Wasm returned an invalid packet detail",
+          );
+        }
+        return bytes;
+      }
+      case "read_packet_evidence": {
+        this.#assertTransferCapacity();
+        return exactByteArray(
+          adapter.readPacketEvidence(
+            canonicalHandle(request.datasetHandle),
+            request.packetId,
+            request.relativeStart,
+            request.maxBytes,
+          ),
+          request.maxBytes,
+          "packet evidence",
+        );
+      }
+      case "correlate_packet_range": {
+        this.#assertTransferCapacity();
+        const maximum = normalizeCapabilities(compiledCapabilities()).maxCorrelationMatches;
+        if (maximum === undefined) {
+          throw new BoundaryProtocolError(
+            "unsupported_version",
+            "packet correlation is unavailable",
+          );
+        }
+        return exactFieldIds(
+          adapter.correlatePacketRange(
+            canonicalHandle(request.datasetHandle),
+            request.packetId,
+            request.relativeStart,
+            request.length,
+          ),
+          maximum,
         );
       }
       case "resource_stats":
@@ -812,11 +997,17 @@ export function installBoundaryWorker(): BoundaryRuntime {
           status: "ok",
           value,
         };
-        if (request.operation === "read_packet_batch" || request.operation === "read_evidence") {
-          if (!(value instanceof Uint8Array)) {
+        if (
+          request.operation === "read_packet_batch" ||
+          request.operation === "read_evidence" ||
+          request.operation === "read_packet_detail" ||
+          request.operation === "read_packet_evidence" ||
+          request.operation === "correlate_packet_range"
+        ) {
+          if (!(value instanceof Uint8Array) && !(value instanceof Uint32Array)) {
             throw new BoundaryProtocolError(
               "internal_invariant",
-              "binary response is not a byte array",
+              "binary response is not a typed array",
             );
           }
           if (!(value.buffer instanceof ArrayBuffer)) {

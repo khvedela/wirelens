@@ -12,15 +12,17 @@
 //! explicit scheduling and cancellation checkpoints. Dataset disposal
 //! cascades to dependent cursors so abandoned requests retain no query state.
 //!
-//! No Rust structure layout is part of the wire contract. Packet batches are
-//! encoded explicitly in little-endian order, and exact 64-bit timestamp and
-//! evidence values are never converted through JSON or a JavaScript `Number`.
+//! No Rust structure layout is part of the wire contract. Packet-row and
+//! packet-detail batches are encoded explicitly in little-endian order, and
+//! exact 64-bit timestamp and evidence values are never converted through JSON
+//! or a JavaScript `Number`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod batch;
 mod boundary;
+mod detail;
 mod error;
 mod handle;
 
@@ -42,10 +44,12 @@ pub use boundary::{
     MAX_CAPTURE_INTERFACES, MAX_CAPTURE_LAYERS, MAX_CAPTURE_LAYERS_PER_PACKET, MAX_CAPTURE_PACKETS,
     MAX_CAPTURE_SECTIONS, MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES, MAX_EVIDENCE_BYTES,
     MAX_IMPORT_HANDLES, MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS, MAX_PACKET_BATCH_BYTES,
-    MAX_PACKET_BATCH_ROWS, MAX_PACKET_CURSOR_HANDLES, MAX_TOTAL_CAPTURE_BYTES,
-    MAX_TOTAL_LOGICAL_BYTES, MIN_PACKET_BATCH_BYTES, PublishedDataset, ResourceStats,
-    packet_limit_for_capture,
+    MAX_PACKET_BATCH_ROWS, MAX_PACKET_CORRELATION_MATCHES, MAX_PACKET_CURSOR_HANDLES,
+    MAX_PACKET_DETAIL_BYTES, MAX_PACKET_EVIDENCE_BYTES, MAX_TOTAL_CAPTURE_BYTES,
+    MAX_TOTAL_LOGICAL_BYTES, MIN_PACKET_BATCH_BYTES, MIN_PACKET_DETAIL_BYTES, PublishedDataset,
+    ResourceStats, packet_limit_for_capture,
 };
+pub use detail::{PACKET_DETAIL_SCHEMA_VERSION, PacketDetailBatch};
 pub use error::{BoundaryError, BoundaryErrorCode};
 pub use handle::{BoundaryHandle, HandleKind, HandleWords};
 pub use packet_core::ImportLimits;

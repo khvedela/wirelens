@@ -124,6 +124,7 @@ export function writeSparseArchitectureOversizePcap(
   options?: { minimumBytes?: number },
 ): Promise<WriteResult & { recordCount: number; sparse: true }>;
 export function createHostileFixtureBytes(): Readonly<Record<string, Uint8Array>>;
+export function createPacketInspectorFixtureBytes(): Uint8Array;
 export function createTemporaryFixtureDirectory(prefix?: string): Promise<string>;
 export function generateBrowserIngestionFixtures(
   options: GenerateFixtureOptions,

@@ -50,6 +50,7 @@ prove pre-read resource-limit handling; it is not evidence of a successful 500 M
 | `small-pcap-big-nanoseconds.pcap` | Big-endian legacy nanosecond magic | Success |
 | `small-pcapng-little.pcapng` | Little-endian PCAPNG section | Success |
 | `small-pcapng-big.pcapng` | Big-endian PCAPNG section | Success |
+| `packet-inspector.pcap` | Synthetic DNS nesting, zero-length Ethernet truncation, and 9,000-byte paged evidence | Success with warning |
 | `medium.pcap` | Multi-step PCAP read and parse | Success |
 | `medium.pcapng` | Multi-step PCAPNG read and parse | Success |
 | `supported-large.pcap` | Successful path below 256 MiB | Success |

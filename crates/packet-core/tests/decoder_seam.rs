@@ -299,6 +299,7 @@ fn decoder_error_rolls_back_outputs_but_keeps_container_diagnostics_for_retry() 
 
 enum InvalidDecoder {
     OutsideRange,
+    BytesOutsideField,
     OrphanField,
     TooManyLayers,
     TooManyFields,
@@ -318,6 +319,18 @@ impl PacketDecoder for InvalidDecoder {
                 ByteRange::new(input.data_range().end(), 1).ok_or(ImportError::Arithmetic)?,
                 None,
             ),
+            Self::BytesOutsideField => {
+                let field_range = input
+                    .data_range()
+                    .child(0, 1)
+                    .ok_or(ImportError::Arithmetic)?;
+                let value_range = input
+                    .data_range()
+                    .child(1, 1)
+                    .ok_or(ImportError::Arithmetic)?;
+                sink.add_field(name, FieldValue::Bytes(value_range), field_range)?;
+                Ok(())
+            }
             Self::OrphanField => {
                 sink.add_field(name, FieldValue::None, input.data_range())?;
                 Ok(())
@@ -357,6 +370,10 @@ fn one_packet_error(decoder: InvalidDecoder, limits: ImportLimits) -> ImportErro
 fn sink_rejects_malformed_ranges_and_incomplete_field_hierarchies() {
     assert_eq!(
         one_packet_error(InvalidDecoder::OutsideRange, ImportLimits::default()),
+        ImportError::Model(ModelError::ByteRange)
+    );
+    assert_eq!(
+        one_packet_error(InvalidDecoder::BytesOutsideField, ImportLimits::default()),
         ImportError::Model(ModelError::ByteRange)
     );
     assert_eq!(

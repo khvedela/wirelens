@@ -43,6 +43,7 @@ export interface CaptureImportError {
 
 export interface CaptureImportSummary {
   readonly byteLength: number;
+  readonly datasetGeneration?: number;
   readonly filename: string;
   readonly filenameHintMismatch: boolean;
   readonly format: CaptureFormat;

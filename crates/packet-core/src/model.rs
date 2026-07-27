@@ -516,7 +516,12 @@ impl CaptureDataset {
                         [packet.diagnostics.start() as usize..packet.diagnostics.end() as usize],
                 )
             {
-                if *owned || diagnostic.scope != crate::DiagnosticScope::Packet(packet.id) {
+                if *owned
+                    || diagnostic.scope != crate::DiagnosticScope::Packet(packet.id)
+                    || diagnostic
+                        .byte_range
+                        .is_some_and(|range| !range_contains(packet.data, range))
+                {
                     return Err(ModelError::ArenaOwnership);
                 }
                 *owned = true;
@@ -576,7 +581,7 @@ impl CaptureDataset {
             {
                 return Err(ModelError::StringId);
             }
-            if matches!(field.value, crate::FieldValue::Bytes(range) if !range.is_within(self.metadata.byte_length))
+            if matches!(field.value, crate::FieldValue::Bytes(range) if !range_contains(field.byte_range, range))
             {
                 return Err(ModelError::ByteRange);
             }

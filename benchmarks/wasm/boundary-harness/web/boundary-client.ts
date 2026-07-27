@@ -23,10 +23,20 @@ interface PendingRequest {
 }
 
 interface PendingAudit {
-  operation: "read_evidence" | "read_packet_batch";
+  operation: BinaryOperation;
   reject(error: Error): void;
   resolve(detached: boolean): void;
 }
+
+type BinaryOperation = Extract<
+  BoundaryOperation,
+  | "correlate_packet_range"
+  | "read_evidence"
+  | "read_packet_batch"
+  | "read_packet_detail"
+  | "read_packet_evidence"
+>;
+type BinaryValue = Uint32Array | Uint8Array;
 
 export class BoundaryClientError extends Error {
   readonly code: BoundaryFailure["code"];
@@ -190,6 +200,70 @@ export class BoundaryClient {
     );
   }
 
+  async readPacketDetail(
+    datasetHandle: bigint,
+    packetId: number,
+    detailSchemaVersion: number,
+    maxBytes: number,
+    apiVersion = HARNESS_API_VERSION,
+  ): Promise<{ bytes: Uint8Array; workerSourceDetached: boolean }> {
+    canonicalHandle(datasetHandle);
+    return this.#readBinary<Uint8Array>(
+      {
+        apiVersion,
+        datasetHandle,
+        detailSchemaVersion,
+        maxBytes,
+        operation: "read_packet_detail",
+        packetId,
+      },
+      "read_packet_detail",
+    );
+  }
+
+  async readPacketEvidence(
+    datasetHandle: bigint,
+    packetId: number,
+    relativeStart: number,
+    maxBytes: number,
+    apiVersion = HARNESS_API_VERSION,
+  ): Promise<{ bytes: Uint8Array; workerSourceDetached: boolean }> {
+    canonicalHandle(datasetHandle);
+    return this.#readBinary<Uint8Array>(
+      {
+        apiVersion,
+        datasetHandle,
+        maxBytes,
+        operation: "read_packet_evidence",
+        packetId,
+        relativeStart,
+      },
+      "read_packet_evidence",
+    );
+  }
+
+  async correlatePacketRange(
+    datasetHandle: bigint,
+    packetId: number,
+    relativeStart: number,
+    length: number,
+    apiVersion = HARNESS_API_VERSION,
+  ): Promise<{ fieldIds: Uint32Array; workerSourceDetached: boolean }> {
+    canonicalHandle(datasetHandle);
+    const result = await this.#readBinary<Uint32Array>(
+      {
+        apiVersion,
+        datasetHandle,
+        length,
+        operation: "correlate_packet_range",
+        packetId,
+        relativeStart,
+      },
+      "correlate_packet_range",
+    );
+    return { fieldIds: result.bytes, workerSourceDetached: result.workerSourceDetached };
+  }
+
   resourceStats(apiVersion = HARNESS_API_VERSION): Promise<ResourceStats> {
     return this.#send<ResourceStats>({ apiVersion, operation: "resource_stats" });
   }
@@ -229,10 +303,10 @@ export class BoundaryClient {
     return result;
   }
 
-  async #readBinary(
-    command: Extract<BoundaryCommand, { operation: "read_evidence" | "read_packet_batch" }>,
-    operation: "read_evidence" | "read_packet_batch",
-  ): Promise<{ bytes: Uint8Array; workerSourceDetached: boolean }> {
+  async #readBinary<T extends BinaryValue>(
+    command: Extract<BoundaryCommand, { operation: BinaryOperation }>,
+    operation: BinaryOperation,
+  ): Promise<{ bytes: T; workerSourceDetached: boolean }> {
     if (this.#binaryRequestInFlight) {
       throw new BoundaryClientError({
         code: "resource_limit",
@@ -247,15 +321,18 @@ export class BoundaryClient {
     let receivedTransfer = false;
     let packetBatchResolutionAttempted = false;
     try {
-      const bytes = this.#send<Uint8Array>(command, [], requestId).then((value) => {
+      const bytes = this.#send<BinaryValue>(command, [], requestId).then((value) => {
         receivedTransfer = true;
-        if (!(value instanceof Uint8Array) || !(value.buffer instanceof ArrayBuffer)) {
+        if (
+          (!(value instanceof Uint8Array) && !(value instanceof Uint32Array)) ||
+          !(value.buffer instanceof ArrayBuffer)
+        ) {
           throw new BoundaryClientError({
             code: "internal_invariant",
             message: "worker returned a non-transferable binary value",
           });
         }
-        return value;
+        return value as T;
       });
       const [transferredBytes, workerSourceDetached] = await Promise.all([bytes, audit]);
       if (!workerSourceDetached) {
@@ -265,6 +342,12 @@ export class BoundaryClient {
         });
       }
       if (operation === "read_packet_batch") {
+        if (!(transferredBytes instanceof Uint8Array)) {
+          throw new BoundaryClientError({
+            code: "internal_invariant",
+            message: "packet batch transfer is not a byte array",
+          });
+        }
         // The worker performs the bounded row-level semantic scan before
         // transfer. Keep the main-thread check constant-work by validating
         // only the fixed header and twelve descriptors before commit.
