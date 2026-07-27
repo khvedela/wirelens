@@ -3,6 +3,7 @@ import type {
   CaptureImportModel,
   CaptureSelectionRejection,
 } from "./features/capture-import/import-state";
+import { PacketDetailWorkspace, type PacketDetailWorkspaceProps } from "./features/packet-detail";
 
 const BOOTING_MODEL: CaptureImportModel = { phase: "booting" };
 const NOOP = (): void => undefined;
@@ -15,6 +16,7 @@ export interface AppProps {
   readonly onFileSelected?: (file: File) => void;
   readonly onResetImport?: () => void;
   readonly onSelectionRejected?: (rejection: CaptureSelectionRejection) => void;
+  readonly packetInspection?: Omit<PacketDetailWorkspaceProps, "datasetGeneration" | "packetCount">;
 }
 
 export function App({
@@ -23,7 +25,13 @@ export function App({
   onFileSelected = NOOP_FILE,
   onResetImport = NOOP,
   onSelectionRejected = NOOP_REJECTION,
+  packetInspection,
 }: AppProps) {
+  const completedSummary = importModel.phase === "complete" ? importModel.summary : undefined;
+  const inspectionReady =
+    completedSummary !== undefined &&
+    completedSummary.datasetGeneration !== undefined &&
+    packetInspection !== undefined;
   return (
     <div className="app-shell">
       <header className="site-header">
@@ -41,13 +49,19 @@ export function App({
         </div>
       </header>
 
-      <main id="main-content" className="import-page">
+      <main
+        id="main-content"
+        className={`import-page${inspectionReady ? " import-page--inspection" : ""}`}
+      >
         <section className="import-introduction" aria-labelledby="page-title">
           <p className="page-kicker">Private packet analysis</p>
-          <h1 id="page-title">Open a packet capture</h1>
+          <h1 id="page-title">
+            {inspectionReady ? "Inspect packet evidence" : "Open a packet capture"}
+          </h1>
           <p className="page-lede">
-            Choose a PCAP or PCAPNG file to inspect locally, without sending capture data to a
-            server.
+            {inspectionReady
+              ? "Move between decoded fields and their exact captured bytes. Every query stays in this browser."
+              : "Choose a PCAP or PCAPNG file to inspect locally, without sending capture data to a server."}
           </p>
           <aside className="privacy-notice" data-testid="privacy-notice" aria-label="Privacy">
             <span className="privacy-notice__icon" aria-hidden="true">
@@ -70,6 +84,13 @@ export function App({
           onReset={onResetImport}
           onSelectionRejected={onSelectionRejected}
         />
+        {inspectionReady ? (
+          <PacketDetailWorkspace
+            {...packetInspection}
+            datasetGeneration={completedSummary.datasetGeneration}
+            packetCount={completedSummary.packetsRetained}
+          />
+        ) : null}
       </main>
     </div>
   );

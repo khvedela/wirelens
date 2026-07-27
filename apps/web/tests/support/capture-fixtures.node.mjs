@@ -137,6 +137,7 @@ test("generates a deterministic smoke set and provenance manifest in temporary s
   );
   assert(manifest.fixtures.some(({ fileName }) => fileName === "medium.pcap"));
   assert(manifest.fixtures.some(({ fileName }) => fileName === "medium.pcapng"));
+  assert(manifest.fixtures.some(({ fileName }) => fileName === "packet-inspector.pcap"));
   assert(manifest.fixtures.some(({ fileName }) => fileName === "supported-large.pcap"));
   assert(manifest.fixtures.some(({ fileName }) => fileName === "adr-0001-oversize-guard.pcap"));
   const persisted = JSON.parse(await readFile(join(directory, "fixture-manifest.json"), "utf8"));

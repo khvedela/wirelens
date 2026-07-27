@@ -136,6 +136,70 @@ function syntheticEthernetPayload(byteLength) {
   return bytes;
 }
 
+function ipv4HeaderChecksum(header) {
+  let sum = 0;
+  for (let offset = 0; offset < header.byteLength; offset += 2) {
+    sum += (header[offset] << 8) | header[offset + 1];
+    sum = (sum & 0xffff) + (sum >>> 16);
+  }
+  return ~sum & 0xffff;
+}
+
+function syntheticDnsQueryPayload() {
+  const dnsName = new Uint8Array([
+    3, 0x77, 0x77, 0x77, 7, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 4, 0x74, 0x65, 0x73, 0x74, 0,
+  ]);
+  const dns = new Uint8Array(12 + dnsName.byteLength + 4);
+  const dnsView = new DataView(dns.buffer);
+  dnsView.setUint16(0, 0x1234);
+  dnsView.setUint16(2, 0x0100);
+  dnsView.setUint16(4, 1);
+  dns.set(dnsName, 12);
+  dnsView.setUint16(12 + dnsName.byteLength, 1);
+  dnsView.setUint16(14 + dnsName.byteLength, 1);
+
+  const udp = new Uint8Array(8 + dns.byteLength);
+  const udpView = new DataView(udp.buffer);
+  udpView.setUint16(0, 53_000);
+  udpView.setUint16(2, 53);
+  udpView.setUint16(4, udp.byteLength);
+  udpView.setUint16(6, 0);
+  udp.set(dns, 8);
+
+  const ipv4 = new Uint8Array(20 + udp.byteLength);
+  const ipv4View = new DataView(ipv4.buffer);
+  ipv4[0] = 0x45;
+  ipv4View.setUint16(2, ipv4.byteLength);
+  ipv4View.setUint16(4, 0x2026);
+  ipv4View.setUint16(6, 0x4000);
+  ipv4[8] = 64;
+  ipv4[9] = 17;
+  ipv4.set([192, 0, 2, 10], 12);
+  ipv4.set([198, 51, 100, 53], 16);
+  ipv4View.setUint16(10, ipv4HeaderChecksum(ipv4.subarray(0, 20)));
+  ipv4.set(udp, 20);
+
+  const ethernet = new Uint8Array(14 + ipv4.byteLength);
+  ethernet.set([
+    0x02, 0x00, 0x00, 0x00, 0x00, 0x53, 0x02, 0x00, 0x00, 0x00, 0x00, 0x10, 0x08, 0x00,
+  ]);
+  ethernet.set(ipv4, 14);
+  return ethernet;
+}
+
+export function createPacketInspectorFixtureBytes() {
+  const dns = syntheticDnsQueryPayload();
+  const wide = syntheticEthernetPayload(9_000);
+  return concatBytes(
+    encodePcapGlobalHeader("little-microseconds"),
+    encodePcapRecordHeader({ capturedLength: dns.byteLength, recordIndex: 0 }),
+    dns,
+    encodePcapRecordHeader({ capturedLength: 0, originalLength: 14, recordIndex: 1 }),
+    encodePcapRecordHeader({ capturedLength: wide.byteLength, recordIndex: 2 }),
+    wide,
+  );
+}
+
 export function encodePcapngSectionHeader(endian = "little") {
   assertEndian(endian);
   const bytes = new Uint8Array(PCAPNG_SECTION_HEADER_BYTES);
@@ -562,6 +626,19 @@ export async function generateBrowserIngestionFixtures({
       write: (path) => writePcapngFile(path, recipe),
     });
   }
+
+  const packetInspectorRecipe = {
+    kind: "packet-inspector-pcap",
+    packets: ["ethernet-ipv4-udp-dns-query", "zero-length-truncated-ethernet", "wide-ethernet"],
+  };
+  await addGenerated({
+    expectedOutcome: "success_with_warning",
+    fileName: "packet-inspector.pcap",
+    format: "pcap",
+    intent: "Exercise nested correlation, a zero-length truncation boundary, and paged evidence",
+    recipe: packetInspectorRecipe,
+    write: (path) => writeByteFixture(path, createPacketInspectorFixtureBytes()),
+  });
 
   const mediumPcapRecipe = {
     kind: "pcap",

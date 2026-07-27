@@ -62,6 +62,7 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
     const REPEATED_SESSIONS = 6;
     const CANCELLATION_SAMPLES = 9;
     const FAILURE_SAMPLES = 6;
+    const PACKET_INSPECTION_SAMPLES = 25;
 
     const asU64 = (high: number, low: number): bigint => (BigInt(high) << 32n) | BigInt(low);
     const median = (values: number[]): number => {
@@ -280,6 +281,47 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
       evidenceLength,
     );
     const evidenceDurationMs = performance.now() - evidenceStartedAt;
+    const detailDurationsMs: number[] = [];
+    const packetEvidenceDurationsMs: number[] = [];
+    const correlationDurationsMs: number[] = [];
+    let detailBytes = 0;
+    let packetEvidenceBytes = 0;
+    let correlationMatches = 0;
+    let inspectionTransfersDetached = true;
+    for (let sample = 0; sample < PACKET_INSPECTION_SAMPLES; sample += 1) {
+      const detailStartedAt = performance.now();
+      const detail = await window.wirelensBoundary.readPacketDetail(
+        denseImport.datasetHandle,
+        0,
+        capabilities.detailSchemaVersion,
+        capabilities.maxPacketDetailBytes,
+      );
+      detailDurationsMs.push(performance.now() - detailStartedAt);
+      detailBytes = detail.bytes.byteLength;
+      inspectionTransfersDetached &&= detail.workerSourceDetached;
+
+      const packetEvidenceStartedAt = performance.now();
+      const packetEvidence = await window.wirelensBoundary.readPacketEvidence(
+        denseImport.datasetHandle,
+        0,
+        0,
+        capabilities.maxPacketEvidenceBytes,
+      );
+      packetEvidenceDurationsMs.push(performance.now() - packetEvidenceStartedAt);
+      packetEvidenceBytes = packetEvidence.bytes.byteLength;
+      inspectionTransfersDetached &&= packetEvidence.workerSourceDetached;
+
+      const correlationStartedAt = performance.now();
+      const correlation = await window.wirelensBoundary.correlatePacketRange(
+        denseImport.datasetHandle,
+        0,
+        0,
+        1,
+      );
+      correlationDurationsMs.push(performance.now() - correlationStartedAt);
+      correlationMatches = correlation.fieldIds.length;
+      inspectionTransfersDetached &&= correlation.workerSourceDetached;
+    }
     const denseAfterTransfers = await resourceSnapshot();
     await sampleMemory("dense:after-transfers", true);
 
@@ -574,6 +616,24 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
           samples: wasmMemorySamples,
         },
       },
+      packetInspection: {
+        correlation: {
+          matches: correlationMatches,
+          maximumDurationMs: Math.max(...correlationDurationsMs),
+          samples: PACKET_INSPECTION_SAMPLES,
+        },
+        detail: {
+          byteLength: detailBytes,
+          maximumDurationMs: Math.max(...detailDurationsMs),
+          samples: PACKET_INSPECTION_SAMPLES,
+        },
+        evidence: {
+          byteLength: packetEvidenceBytes,
+          maximumDurationMs: Math.max(...packetEvidenceDurationsMs),
+          samples: PACKET_INSPECTION_SAMPLES,
+        },
+        workerTransfersDetached: inspectionTransfersDetached,
+      },
       resources: {
         afterCancellation: liveResources(afterCancellation),
         afterSparseCleanup: liveResources(afterSparseCleanup),
@@ -659,6 +719,17 @@ test("records bounded-work, memory, ownership, transfer, and cleanup evidence", 
   expect(evidence.batch.workerTransferDetached).toBe(true);
   expect(evidence.evidenceTransfer.byteLength).toBe(evidence.capabilities.maxEvidenceBytes);
   expect(evidence.evidenceTransfer.workerTransferDetached).toBe(true);
+  expect(evidence.packetInspection.detail.byteLength).toBeLessThanOrEqual(
+    evidence.capabilities.maxPacketDetailBytes,
+  );
+  expect(evidence.packetInspection.evidence.byteLength).toBeLessThanOrEqual(
+    evidence.capabilities.maxPacketEvidenceBytes,
+  );
+  expect(evidence.packetInspection.correlation.matches).toBeGreaterThan(0);
+  expect(evidence.packetInspection.workerTransfersDetached).toBe(true);
+  expect(evidence.packetInspection.detail.maximumDurationMs).toBeLessThanOrEqual(200);
+  expect(evidence.packetInspection.evidence.maximumDurationMs).toBeLessThanOrEqual(200);
+  expect(evidence.packetInspection.correlation.maximumDurationMs).toBeLessThanOrEqual(200);
 
   expect(evidence.cancellation.allStatuses).toEqual(Array(9).fill("cancelled"));
   expect(evidence.cancellation.stepPhases).toEqual(Array(9).fill("parsing"));

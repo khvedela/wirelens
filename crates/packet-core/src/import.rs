@@ -341,7 +341,7 @@ impl PacketDecodeSink<'_> {
             self.validate_string_id(id)?;
         }
         if !range_contains(self.packet_range, byte_range)
-            || matches!(value, FieldValue::Bytes(range) if !range_contains(self.packet_range, range))
+            || matches!(value, FieldValue::Bytes(range) if !range_contains(byte_range, range))
         {
             return Err(ImportError::Model(ModelError::ByteRange));
         }

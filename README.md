@@ -43,6 +43,7 @@ Packet data can contain credentials, identifiers, private conversations, and pro
 - A production module-worker harness that blocks external traffic and verifies detached binary transfers in Chromium and Firefox CI.
 - An accessible React file picker and drag-and-drop importer that validates capture magic, reads and parses only in a module worker, reports separate read/parse progress, cancels cooperatively, and retains no raw capture in browser storage.
 - Platform-neutral, bounded [Ethernet II, single-tag IEEE 802.1Q, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6, and port-53 DNS decoding](docs/protocol-decoding.md) with exact field-to-byte evidence, bounded option, extension, DNS-record, and compressed-name traversal, fragment metadata, checksum caveats, and structured recovery.
+- A focused [raw-byte and decoded-field inspector](docs/raw-byte-correlation.md) with bounded packet-relative evidence paging, deterministic nested/overlap resolution, zero-length and truncation markers, and virtualized accessible field/hex navigation.
 
 ## Accepted v0.1 architecture
 

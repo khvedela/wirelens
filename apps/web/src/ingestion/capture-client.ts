@@ -1,3 +1,11 @@
+import {
+  decodePacketDetail,
+  MAX_PACKET_DETAIL_BYTES,
+  MAX_PACKET_DETAIL_FIELDS,
+  MAX_PACKET_DETAIL_LAYERS,
+  PACKET_DETAIL_SCHEMA_VERSION,
+  type PacketDetail,
+} from "../boundary/packet-detail";
 import type { BoundaryErrorCode, ResourceStats } from "../boundary/worker-contract";
 import {
   CAPTURE_INGESTION_PROTOCOL_VERSION,
@@ -6,6 +14,11 @@ import {
   type ImportError,
   type ImportSummary,
   type IngestionCapabilities,
+  PACKET_EVIDENCE_PAGE_BYTES,
+  type PacketEvidencePage,
+  type PacketQueryError,
+  type PacketQueryErrorCode,
+  type PacketSelectionResolution,
   type ParseProgress,
   type ReadProgress,
   type TerminalProgress,
@@ -28,6 +41,20 @@ export class CaptureImportCancelledError extends Error {
   }
 }
 
+export class CapturePacketQueryError extends Error {
+  constructor(readonly detail: PacketQueryError) {
+    super(detail.code);
+    this.name = "CapturePacketQueryError";
+  }
+}
+
+export class CapturePacketQueryCancelledError extends CapturePacketQueryError {
+  constructor() {
+    super({ code: "cancelled" });
+    this.name = "CapturePacketQueryCancelledError";
+  }
+}
+
 export type ImportProgressEvent = Extract<CaptureWorkerEvent, { type: "progress" }>;
 export type CaptureWorkerFactory = () => Worker;
 
@@ -43,6 +70,23 @@ interface PendingCommand<T> {
   type: "dispose_dataset" | "initialize" | "resource_stats" | "shutdown";
 }
 
+type PacketQueryType =
+  | "read_packet_detail"
+  | "read_packet_evidence_page"
+  | "resolve_packet_selection";
+
+interface PendingPacketQuery {
+  cleanup(): void;
+  datasetGeneration: number;
+  packetId: number;
+  pageStart?: number;
+  reject(error: CapturePacketQueryError): void;
+  resolve(value: unknown): void;
+  selectionLength?: number;
+  selectionStart?: number;
+  type: PacketQueryType;
+}
+
 const ERROR_CODES = new Set<ImportError["code"]>([
   "empty_capture",
   "internal_failure",
@@ -55,6 +99,17 @@ const ERROR_CODES = new Set<ImportError["code"]>([
   "unsupported_version",
   "worker_failed",
 ]);
+const PACKET_QUERY_ERROR_CODES = new Set<PacketQueryErrorCode>([
+  "cancelled",
+  "dataset_unavailable",
+  "invalid_packet",
+  "invalid_range",
+  "resource_limit",
+  "stale_dataset",
+  "unsupported_version",
+  "worker_failed",
+]);
+const DECODED_PACKET_DETAILS = new WeakMap<Uint8Array, PacketDetail>();
 const BOUNDARY_ERROR_CODES = new Set<BoundaryErrorCode>([
   "cancelled",
   "internal_invariant",
@@ -105,6 +160,10 @@ function internalFailure(): CaptureImportClientError {
   return new CaptureImportClientError({ code: "worker_failed" });
 }
 
+function queryFailure(code: PacketQueryErrorCode): CapturePacketQueryError {
+  return new CapturePacketQueryError({ code });
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
@@ -142,6 +201,35 @@ function safeCount(value: unknown): value is number {
 
 function word(value: unknown): value is number {
   return safeCount(value) && value <= 0xffff_ffff;
+}
+
+function exactUint8Array(value: unknown, maximumElements: number): value is Uint8Array {
+  return (
+    value instanceof Uint8Array &&
+    value.buffer instanceof ArrayBuffer &&
+    value.byteOffset === 0 &&
+    value.byteLength === value.buffer.byteLength &&
+    value.length <= maximumElements
+  );
+}
+
+function exactUint32Array(value: unknown, maximumElements: number): value is Uint32Array {
+  return (
+    value instanceof Uint32Array &&
+    value.buffer instanceof ArrayBuffer &&
+    value.byteOffset === 0 &&
+    value.byteLength === value.buffer.byteLength &&
+    value.length <= maximumElements
+  );
+}
+
+function packetQueryError(value: unknown): PacketQueryError | undefined {
+  const candidate = record(value);
+  return candidate !== undefined &&
+    typeof candidate.code === "string" &&
+    PACKET_QUERY_ERROR_CODES.has(candidate.code as PacketQueryErrorCode)
+    ? { code: candidate.code as PacketQueryErrorCode }
+    : undefined;
 }
 
 function readProgress(value: unknown): value is ReadProgress {
@@ -194,15 +282,34 @@ function summary(value: unknown): value is ImportSummary {
     safeCount(candidate.packetsRetained) &&
     safeCount(candidate.records) &&
     candidate.packetsRetained <= candidate.records &&
-    safeCount(candidate.warningCount)
+    safeCount(candidate.warningCount) &&
+    (candidate.datasetGeneration === undefined || positiveId(candidate.datasetGeneration))
   );
 }
 
 function ingestionCapabilities(value: unknown): value is IngestionCapabilities {
   const candidate = record(value);
   const wasm = record(candidate?.wasm);
+  const inspection = record(candidate?.packetInspection);
+  const inspectionIsValid =
+    inspection === undefined ||
+    (inspection.detailSchemaVersion === PACKET_DETAIL_SCHEMA_VERSION &&
+      inspection.evidencePageBytes === PACKET_EVIDENCE_PAGE_BYTES &&
+      safeCount(inspection.maxCorrelationMatches) &&
+      inspection.maxCorrelationMatches > 0 &&
+      inspection.maxCorrelationMatches <= MAX_PACKET_DETAIL_FIELDS &&
+      safeCount(inspection.maxDetailBytes) &&
+      inspection.maxDetailBytes >= 80 + 20 * 24 &&
+      inspection.maxDetailBytes <= MAX_PACKET_DETAIL_BYTES &&
+      safeCount(inspection.maxFieldsPerPacket) &&
+      inspection.maxFieldsPerPacket > 0 &&
+      inspection.maxFieldsPerPacket <= MAX_PACKET_DETAIL_FIELDS &&
+      safeCount(inspection.maxLayersPerPacket) &&
+      inspection.maxLayersPerPacket > 0 &&
+      inspection.maxLayersPerPacket <= MAX_PACKET_DETAIL_LAYERS);
   return (
     candidate !== undefined &&
+    inspectionIsValid &&
     safeCount(candidate.maxCaptureBytes) &&
     candidate.maxCaptureBytes > 0 &&
     safeCount(candidate.readChunkBytes) &&
@@ -222,6 +329,54 @@ function ingestionCapabilities(value: unknown): value is IngestionCapabilities {
 function resourceStats(value: unknown): value is ResourceStats {
   const candidate = record(value);
   return candidate !== undefined && RESOURCE_STAT_KEYS.every((key) => word(candidate[key]));
+}
+
+function packetQueryIdentity(value: Record<string, unknown>): boolean {
+  return positiveId(value.requestId) && positiveId(value.datasetGeneration) && word(value.packetId);
+}
+
+function packetDetailEvent(value: Record<string, unknown>): boolean {
+  if (!packetQueryIdentity(value) || !exactUint8Array(value.bytes, MAX_PACKET_DETAIL_BYTES)) {
+    return false;
+  }
+  try {
+    DECODED_PACKET_DETAILS.set(
+      value.bytes,
+      decodePacketDetail(value.bytes, value.packetId as number),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function packetEvidenceEvent(value: Record<string, unknown>): boolean {
+  return (
+    packetQueryIdentity(value) &&
+    word(value.pageStart) &&
+    value.pageStart % PACKET_EVIDENCE_PAGE_BYTES === 0 &&
+    exactUint8Array(value.bytes, PACKET_EVIDENCE_PAGE_BYTES)
+  );
+}
+
+function packetSelectionEvent(value: Record<string, unknown>): boolean {
+  if (
+    !packetQueryIdentity(value) ||
+    !word(value.selectionStart) ||
+    !word(value.selectionLength) ||
+    value.selectionStart + value.selectionLength > 0xffff_ffff ||
+    !exactUint32Array(value.fieldIds, MAX_PACKET_DETAIL_FIELDS)
+  ) {
+    return false;
+  }
+  const expectedPrimary = value.fieldIds[0] ?? null;
+  if (value.primaryFieldId !== expectedPrimary) return false;
+  const seen = new Set<number>();
+  for (const fieldId of value.fieldIds) {
+    if (seen.has(fieldId)) return false;
+    seen.add(fieldId);
+  }
+  return true;
 }
 
 export function validateCaptureWorkerEvent(value: unknown): CaptureWorkerEvent | undefined {
@@ -276,6 +431,16 @@ export function validateCaptureWorkerEvent(value: unknown): CaptureWorkerEvent |
       return positiveId(candidate.requestId) && resourceStats(candidate.stats)
         ? (value as CaptureWorkerEvent)
         : undefined;
+    case "packet_detail":
+      return packetDetailEvent(candidate) ? (value as CaptureWorkerEvent) : undefined;
+    case "packet_evidence_page":
+      return packetEvidenceEvent(candidate) ? (value as CaptureWorkerEvent) : undefined;
+    case "packet_selection_resolved":
+      return packetSelectionEvent(candidate) ? (value as CaptureWorkerEvent) : undefined;
+    case "packet_query_error":
+      return packetQueryIdentity(candidate) && packetQueryError(candidate.error) !== undefined
+        ? (value as CaptureWorkerEvent)
+        : undefined;
     case "command_error":
       return positiveId(candidate.requestId) && importError(candidate.error) !== undefined
         ? (value as CaptureWorkerEvent)
@@ -289,6 +454,7 @@ export class CaptureImportClient {
   readonly #worker: Worker;
   readonly #commands = new Map<number, PendingCommand<unknown>>();
   readonly #imports = new Map<number, PendingImport>();
+  readonly #packetQueries = new Map<number, PendingPacketQuery>();
   #activeJobId: number | undefined;
   #closed = false;
   #nextId = 1;
@@ -326,6 +492,7 @@ export class CaptureImportClient {
     if (this.#closed || this.#activeJobId !== undefined || this.#startingImport) {
       throw new CaptureImportClientError({ code: "invalid_selection" });
     }
+    this.#invalidatePacketQueries({ code: "dataset_unavailable" });
     this.#startingImport = true;
     try {
       await this.#initialization;
@@ -359,6 +526,7 @@ export class CaptureImportClient {
   }
 
   async disposeDataset(): Promise<void> {
+    this.#invalidatePacketQueries({ code: "dataset_unavailable" });
     await this.#initialization;
     await this.#request("dispose_dataset");
   }
@@ -368,8 +536,104 @@ export class CaptureImportClient {
     return this.#request<ResourceStats>("resource_stats");
   }
 
+  async readPacketDetail(
+    datasetGeneration: number,
+    packetId: number,
+    signal?: AbortSignal,
+  ): Promise<PacketDetail> {
+    const inspection = (await this.#packetCapabilities(signal)).packetInspection;
+    this.#validatePacketIdentity(datasetGeneration, packetId, inspection !== undefined, signal);
+    if (inspection === undefined) throw queryFailure("unsupported_version");
+    return this.#packetRequest<PacketDetail>(
+      {
+        datasetGeneration,
+        packetId,
+        type: "read_packet_detail",
+      },
+      signal,
+      (requestId) => ({
+        datasetGeneration,
+        detailSchemaVersion: inspection.detailSchemaVersion,
+        packetId,
+        protocolVersion: CAPTURE_INGESTION_PROTOCOL_VERSION,
+        requestId,
+        type: "read_packet_detail",
+      }),
+    );
+  }
+
+  async readPacketEvidencePage(
+    datasetGeneration: number,
+    packetId: number,
+    pageStart: number,
+    signal?: AbortSignal,
+  ): Promise<PacketEvidencePage> {
+    const inspection = (await this.#packetCapabilities(signal)).packetInspection;
+    this.#validatePacketIdentity(datasetGeneration, packetId, inspection !== undefined, signal);
+    if (
+      inspection === undefined ||
+      !word(pageStart) ||
+      pageStart % inspection.evidencePageBytes !== 0
+    ) {
+      throw queryFailure(inspection === undefined ? "unsupported_version" : "invalid_range");
+    }
+    return this.#packetRequest<PacketEvidencePage>(
+      { datasetGeneration, packetId, pageStart, type: "read_packet_evidence_page" },
+      signal,
+      (requestId) => ({
+        datasetGeneration,
+        packetId,
+        pageStart,
+        protocolVersion: CAPTURE_INGESTION_PROTOCOL_VERSION,
+        requestId,
+        type: "read_packet_evidence_page",
+      }),
+    );
+  }
+
+  async resolvePacketSelection(
+    datasetGeneration: number,
+    packetId: number,
+    selectionStart: number,
+    selectionLength: number,
+    signal?: AbortSignal,
+  ): Promise<PacketSelectionResolution> {
+    const inspection = (await this.#packetCapabilities(signal)).packetInspection;
+    this.#validatePacketIdentity(datasetGeneration, packetId, inspection !== undefined, signal);
+    if (inspection === undefined) throw queryFailure("unsupported_version");
+    const selectionEnd = selectionStart + selectionLength;
+    if (
+      !word(selectionStart) ||
+      !word(selectionLength) ||
+      !Number.isSafeInteger(selectionEnd) ||
+      selectionEnd > 0xffff_ffff
+    ) {
+      throw queryFailure("invalid_range");
+    }
+    return this.#packetRequest<PacketSelectionResolution>(
+      {
+        datasetGeneration,
+        packetId,
+        selectionLength,
+        selectionStart,
+        type: "resolve_packet_selection",
+      },
+      signal,
+      (requestId) => ({
+        datasetGeneration,
+        packetId,
+        protocolVersion: CAPTURE_INGESTION_PROTOCOL_VERSION,
+        requestId,
+        selectionLength,
+        selectionStart,
+        type: "resolve_packet_selection",
+      }),
+    );
+  }
+
   async shutdown(): Promise<void> {
     if (this.#closed) return;
+    this.#invalidatePacketQueries({ code: "dataset_unavailable" });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       const graceful = this.#initialization.then(() => this.#request("shutdown"));
@@ -388,6 +652,87 @@ export class CaptureImportClient {
     this.#closed = true;
     this.#worker.terminate();
     this.#failAll(internalFailure());
+  }
+
+  #validatePacketIdentity(
+    datasetGeneration: number,
+    packetId: number,
+    supported: boolean,
+    signal?: AbortSignal,
+  ): void {
+    if (this.#closed) throw queryFailure("worker_failed");
+    if (signal?.aborted) throw new CapturePacketQueryCancelledError();
+    if (!supported) throw queryFailure("unsupported_version");
+    if (!positiveId(datasetGeneration)) throw queryFailure("stale_dataset");
+    if (!word(packetId)) throw queryFailure("invalid_packet");
+  }
+
+  #packetCapabilities(signal?: AbortSignal): Promise<IngestionCapabilities> {
+    if (this.#closed) return Promise.reject(queryFailure("worker_failed"));
+    if (signal?.aborted) return Promise.reject(new CapturePacketQueryCancelledError());
+    if (signal === undefined) {
+      return this.#initialization.catch(() => {
+        throw queryFailure("worker_failed");
+      });
+    }
+    return new Promise<IngestionCapabilities>((resolve, reject) => {
+      const abort = (): void => {
+        cleanup();
+        reject(new CapturePacketQueryCancelledError());
+      };
+      const cleanup = (): void => signal.removeEventListener("abort", abort);
+      signal.addEventListener("abort", abort, { once: true });
+      void this.#initialization.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        () => {
+          cleanup();
+          reject(queryFailure("worker_failed"));
+        },
+      );
+      if (signal.aborted) abort();
+    });
+  }
+
+  #packetRequest<T>(
+    metadata: Omit<PendingPacketQuery, "cleanup" | "reject" | "resolve">,
+    signal: AbortSignal | undefined,
+    command: (requestId: number) => CaptureWorkerCommand,
+  ): Promise<T> {
+    if (this.#closed) return Promise.reject(queryFailure("worker_failed"));
+    if (signal?.aborted) return Promise.reject(new CapturePacketQueryCancelledError());
+    const requestId = this.#takeId();
+    return new Promise<T>((resolve, reject) => {
+      const abort = (): void => {
+        const pending = this.#packetQueries.get(requestId);
+        if (pending === undefined) return;
+        this.#packetQueries.delete(requestId);
+        pending.cleanup();
+        reject(new CapturePacketQueryCancelledError());
+      };
+      const cleanup = (): void => signal?.removeEventListener("abort", abort);
+      const pending: PendingPacketQuery = {
+        ...metadata,
+        cleanup,
+        reject,
+        resolve: (value) => resolve(value as T),
+      };
+      this.#packetQueries.set(requestId, pending);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      try {
+        this.#post(command(requestId));
+      } catch {
+        this.#packetQueries.delete(requestId);
+        cleanup();
+        reject(queryFailure("worker_failed"));
+      }
+    });
   }
 
   #request<T>(type: PendingCommand<T>["type"]): Promise<T> {
@@ -445,6 +790,82 @@ export class CaptureImportClient {
       return;
     }
 
+    if (
+      event.type === "packet_detail" ||
+      event.type === "packet_evidence_page" ||
+      event.type === "packet_selection_resolved" ||
+      event.type === "packet_query_error"
+    ) {
+      if (event.type === "packet_query_error" && event.error.code === "worker_failed") {
+        this.#abort(internalFailure());
+        return;
+      }
+      const pending = this.#packetQueries.get(event.requestId);
+      if (pending === undefined) return;
+      if (
+        pending.datasetGeneration !== event.datasetGeneration ||
+        pending.packetId !== event.packetId ||
+        (event.type === "packet_detail" && pending.type !== "read_packet_detail") ||
+        (event.type === "packet_evidence_page" &&
+          (pending.type !== "read_packet_evidence_page" ||
+            pending.pageStart !== event.pageStart)) ||
+        (event.type === "packet_selection_resolved" &&
+          (pending.type !== "resolve_packet_selection" ||
+            pending.selectionStart !== event.selectionStart ||
+            pending.selectionLength !== event.selectionLength))
+      ) {
+        this.#abort(internalFailure());
+        return;
+      }
+      this.#packetQueries.delete(event.requestId);
+      pending.cleanup();
+      if (event.type === "packet_query_error") {
+        const detail = packetQueryError(event.error) ?? { code: "worker_failed" as const };
+        pending.reject(new CapturePacketQueryError(detail));
+        if (detail.code === "worker_failed") this.#abort(internalFailure());
+        return;
+      }
+      try {
+        if (event.type === "packet_detail") {
+          const detail = DECODED_PACKET_DETAILS.get(event.bytes);
+          DECODED_PACKET_DETAILS.delete(event.bytes);
+          if (detail === undefined) throw new Error("validated packet detail was not retained");
+          pending.resolve(detail);
+        } else if (event.type === "packet_evidence_page") {
+          pending.resolve({
+            bytes: event.bytes,
+            datasetGeneration: event.datasetGeneration,
+            packetId: event.packetId,
+            pageStart: event.pageStart,
+          } satisfies PacketEvidencePage);
+        } else {
+          pending.resolve({
+            datasetGeneration: event.datasetGeneration,
+            fieldIds: event.fieldIds,
+            packetId: event.packetId,
+            primaryFieldId: event.primaryFieldId,
+            selectionLength: event.selectionLength,
+            selectionStart: event.selectionStart,
+          } satisfies PacketSelectionResolution);
+        }
+      } catch {
+        pending.reject(queryFailure("worker_failed"));
+        this.#abort(internalFailure());
+      }
+      return;
+    }
+
+    if (event.type === "command_error") {
+      const packetQuery = this.#packetQueries.get(event.requestId);
+      if (packetQuery !== undefined) {
+        this.#packetQueries.delete(event.requestId);
+        packetQuery.cleanup();
+        packetQuery.reject(queryFailure("worker_failed"));
+        this.#abort(internalFailure());
+        return;
+      }
+    }
+
     const pending = this.#commands.get(event.requestId);
     if (pending === undefined) return;
     this.#commands.delete(event.requestId);
@@ -488,10 +909,23 @@ export class CaptureImportClient {
   #failAll(error: CaptureImportClientError): void {
     for (const pending of this.#commands.values()) pending.reject(error);
     for (const pending of this.#imports.values()) pending.reject(error);
+    for (const pending of this.#packetQueries.values()) {
+      pending.cleanup();
+      pending.reject(queryFailure("worker_failed"));
+    }
     this.#commands.clear();
     this.#imports.clear();
+    this.#packetQueries.clear();
     this.#activeJobId = undefined;
     this.#startingImport = false;
+  }
+
+  #invalidatePacketQueries(detail: PacketQueryError): void {
+    for (const pending of this.#packetQueries.values()) {
+      pending.cleanup();
+      pending.reject(new CapturePacketQueryError(detail));
+    }
+    this.#packetQueries.clear();
   }
 
   #abort(error: CaptureImportClientError): void {

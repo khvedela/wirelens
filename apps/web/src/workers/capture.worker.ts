@@ -17,6 +17,9 @@ import {
   type ImportError,
   type ImportSummary,
   type IngestionCapabilities,
+  PACKET_EVIDENCE_PAGE_BYTES,
+  type PacketInspectionCapabilities,
+  type PacketQueryError,
   type ParseProgress,
   type ReadProgress,
 } from "../ingestion/capture-contract";
@@ -30,10 +33,18 @@ import { reclaimImportHandle } from "../ingestion/import-cleanup";
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 const PARSE_STEP_BYTES = 4 * 1024 * 1024;
 const PARSE_STEP_RECORDS = 4_096;
+const MAX_ACTIVE_PACKET_QUERIES = 8;
 
 const runtime = new BoundaryRuntime(globalThis.constructor.name);
 let capabilities: IngestionCapabilities | undefined;
-let datasetHandle: bigint | undefined;
+interface LiveDataset {
+  generation: number;
+  handle: bigint;
+  packetCount: number;
+}
+
+let liveDataset: LiveDataset | undefined;
+let nextDatasetGeneration = 1;
 let shuttingDown = false;
 
 interface ActiveJob {
@@ -47,6 +58,7 @@ interface ActiveJob {
 
 let activeJob: ActiveJob | undefined;
 let activeWork: Promise<void> | undefined;
+const activePacketQueries = new Map<number, Promise<void>>();
 
 class ImportFailure extends Error {
   constructor(
@@ -58,6 +70,12 @@ class ImportFailure extends Error {
 }
 
 class ImportCancelled extends Error {}
+
+class PacketQueryFailure extends Error {
+  constructor(readonly detail: PacketQueryError) {
+    super(detail.code);
+  }
+}
 
 function post(event: CaptureWorkerEvent): void {
   globalThis.postMessage(event);
@@ -75,6 +93,24 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function exactPositiveId(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function exactU32(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 0xffff_ffff
+    ? value
+    : undefined;
+}
+
+function takeDatasetGeneration(): number {
+  if (!Number.isSafeInteger(nextDatasetGeneration) || nextDatasetGeneration <= 0) {
+    throw new BoundaryProtocolError("resource_limit", "dataset generations are exhausted");
+  }
+  const generation = nextDatasetGeneration;
+  nextDatasetGeneration += 1;
+  return generation;
 }
 
 function exactU64(high: number, low: number): bigint {
@@ -143,8 +179,10 @@ function yieldMacrotask(): Promise<void> {
 async function ensureCapabilities(): Promise<IngestionCapabilities> {
   if (capabilities !== undefined) return capabilities;
   const metadata = await runtime.metadata();
+  const packetInspection = packetInspectionCapabilities(metadata.capabilities);
   capabilities = {
     maxCaptureBytes: metadata.capabilities.maxCaptureBytes,
+    ...(packetInspection === undefined ? {} : { packetInspection }),
     readChunkBytes: READ_CHUNK_BYTES,
     wasm: {
       apiVersion: metadata.capabilities.apiVersion,
@@ -156,11 +194,43 @@ async function ensureCapabilities(): Promise<IngestionCapabilities> {
   return capabilities;
 }
 
+function packetInspectionCapabilities(
+  value: Awaited<ReturnType<BoundaryRuntime["metadata"]>>["capabilities"],
+): PacketInspectionCapabilities | undefined {
+  const {
+    detailSchemaVersion,
+    maxCorrelationMatches,
+    maxFieldsPerPacket,
+    maxLayersPerPacket,
+    maxPacketDetailBytes,
+    maxPacketEvidenceBytes,
+  } = value;
+  if (
+    detailSchemaVersion === undefined ||
+    maxCorrelationMatches === undefined ||
+    maxFieldsPerPacket === undefined ||
+    maxLayersPerPacket === undefined ||
+    maxPacketDetailBytes === undefined ||
+    maxPacketEvidenceBytes === undefined ||
+    maxPacketEvidenceBytes < PACKET_EVIDENCE_PAGE_BYTES
+  ) {
+    return undefined;
+  }
+  return {
+    detailSchemaVersion,
+    evidencePageBytes: PACKET_EVIDENCE_PAGE_BYTES,
+    maxCorrelationMatches,
+    maxDetailBytes: maxPacketDetailBytes,
+    maxFieldsPerPacket,
+    maxLayersPerPacket,
+  };
+}
+
 async function releaseDataset(): Promise<void> {
-  if (datasetHandle === undefined) return;
-  const handle = datasetHandle;
-  await runtime.dispose(handle);
-  if (datasetHandle === handle) datasetHandle = undefined;
+  const dataset = liveDataset;
+  liveDataset = undefined;
+  if (dataset === undefined) return;
+  await runtime.dispose(dataset.handle);
 }
 
 async function readSlice(file: File, start: number, end: number): Promise<ArrayBuffer> {
@@ -260,7 +330,7 @@ async function failClosedAfterCleanupLoss(job: ActiveJob): Promise<void> {
     // Closing the worker is the final process-level reclamation boundary when
     // the Wasm runtime can no longer confirm individual-handle cleanup.
   } finally {
-    datasetHandle = undefined;
+    liveDataset = undefined;
     globalThis.close();
   }
 }
@@ -316,10 +386,22 @@ async function runImport(job: ActiveJob, file: File): Promise<void> {
           );
         }
         job.importHandle = undefined;
-        datasetHandle = result.datasetHandle;
+        let datasetGeneration: number;
+        try {
+          datasetGeneration = takeDatasetGeneration();
+        } catch (error) {
+          await runtime.dispose(result.datasetHandle);
+          throw error;
+        }
+        liveDataset = {
+          generation: datasetGeneration,
+          handle: result.datasetHandle,
+          packetCount: progress.packetsRetained,
+        };
         const summary: ImportSummary = {
           byteLength: file.size,
           byteOrder: detected.byteOrder,
+          ...(currentCapabilities.packetInspection === undefined ? {} : { datasetGeneration }),
           filename: file.name,
           filenameHintMismatch: hint.mismatchesDetectedFormat,
           format: detected.format,
@@ -384,15 +466,197 @@ function commandError(requestId: number, error: ImportError): void {
   post({ ...envelope(), error, requestId, type: "command_error" });
 }
 
+interface PacketQueryContext {
+  readonly dataset: LiveDataset;
+  readonly inspection: PacketInspectionCapabilities;
+}
+
+interface PacketQueryIdentity {
+  readonly datasetGeneration: number;
+  readonly packetId: number;
+  readonly requestId: number;
+}
+
+function postPacketQueryError(identity: PacketQueryIdentity, error: PacketQueryError): void {
+  post({ ...envelope(), ...identity, error, type: "packet_query_error" });
+}
+
+function packetQueryContext(identity: PacketQueryIdentity): PacketQueryContext {
+  const inspection = capabilities?.packetInspection;
+  if (inspection === undefined) {
+    throw new PacketQueryFailure({ code: "unsupported_version" });
+  }
+  if (activeJob !== undefined || shuttingDown || liveDataset === undefined) {
+    throw new PacketQueryFailure({ code: "dataset_unavailable" });
+  }
+  if (liveDataset.generation !== identity.datasetGeneration) {
+    throw new PacketQueryFailure({ code: "stale_dataset" });
+  }
+  if (identity.packetId >= liveDataset.packetCount) {
+    throw new PacketQueryFailure({ code: "invalid_packet" });
+  }
+  return { dataset: liveDataset, inspection };
+}
+
+function packetQueryError(error: unknown): PacketQueryError {
+  if (error instanceof PacketQueryFailure) return error.detail;
+  const failure = normalizeBoundaryFailure(error);
+  switch (failure.code) {
+    case "cancelled":
+      return { code: "cancelled" };
+    case "invalid_argument":
+      return { code: "invalid_range" };
+    case "resource_limit":
+      return { code: "resource_limit" };
+    case "unsupported_version":
+      return { code: "unsupported_version" };
+    default:
+      return { code: "worker_failed" };
+  }
+}
+
+function queryStillCurrent(context: PacketQueryContext): boolean {
+  return !shuttingDown && liveDataset === context.dataset && activeJob === undefined;
+}
+
+function postTransferred(
+  event: Extract<
+    CaptureWorkerEvent,
+    { type: "packet_detail" | "packet_evidence_page" | "packet_selection_resolved" }
+  >,
+  value: Uint8Array | Uint32Array,
+): void {
+  globalThis.postMessage(event, { transfer: [value.buffer] });
+}
+
+function startPacketQuery(identity: PacketQueryIdentity, operation: () => Promise<void>): void {
+  if (
+    activePacketQueries.size >= MAX_ACTIVE_PACKET_QUERIES ||
+    activePacketQueries.has(identity.requestId)
+  ) {
+    postPacketQueryError(identity, { code: "resource_limit" });
+    return;
+  }
+  const work = operation().finally(() => {
+    activePacketQueries.delete(identity.requestId);
+  });
+  activePacketQueries.set(identity.requestId, work);
+}
+
+async function readPacketDetail(
+  identity: PacketQueryIdentity,
+  detailSchemaVersion: number,
+): Promise<void> {
+  let context: PacketQueryContext | undefined;
+  try {
+    context = packetQueryContext(identity);
+    if (detailSchemaVersion !== context.inspection.detailSchemaVersion) {
+      throw new PacketQueryFailure({ code: "unsupported_version" });
+    }
+    const bytes = await runtime.readPacketDetail(
+      context.dataset.handle,
+      identity.packetId,
+      detailSchemaVersion,
+      context.inspection.maxDetailBytes,
+    );
+    if (!queryStillCurrent(context)) return;
+    postTransferred({ ...envelope(), ...identity, bytes, type: "packet_detail" }, bytes);
+  } catch (error) {
+    if (context !== undefined && !queryStillCurrent(context)) return;
+    postPacketQueryError(identity, packetQueryError(error));
+  }
+}
+
+async function readPacketEvidencePage(
+  identity: PacketQueryIdentity,
+  pageStart: number,
+): Promise<void> {
+  let context: PacketQueryContext | undefined;
+  try {
+    context = packetQueryContext(identity);
+    if (
+      pageStart % context.inspection.evidencePageBytes !== 0 ||
+      context.inspection.evidencePageBytes !== PACKET_EVIDENCE_PAGE_BYTES
+    ) {
+      throw new PacketQueryFailure({ code: "invalid_range" });
+    }
+    const bytes = await runtime.readPacketEvidence(
+      context.dataset.handle,
+      identity.packetId,
+      pageStart,
+      context.inspection.evidencePageBytes,
+    );
+    if (!queryStillCurrent(context)) return;
+    postTransferred(
+      { ...envelope(), ...identity, bytes, pageStart, type: "packet_evidence_page" },
+      bytes,
+    );
+  } catch (error) {
+    if (context !== undefined && !queryStillCurrent(context)) return;
+    postPacketQueryError(identity, packetQueryError(error));
+  }
+}
+
+async function resolvePacketSelection(
+  identity: PacketQueryIdentity,
+  selectionStart: number,
+  selectionLength: number,
+): Promise<void> {
+  let context: PacketQueryContext | undefined;
+  try {
+    context = packetQueryContext(identity);
+    const selectionEnd = selectionStart + selectionLength;
+    if (!Number.isSafeInteger(selectionEnd) || selectionEnd > 0xffff_ffff) {
+      throw new PacketQueryFailure({ code: "invalid_range" });
+    }
+    const fieldIds = await runtime.correlatePacketRange(
+      context.dataset.handle,
+      identity.packetId,
+      selectionStart,
+      selectionLength,
+    );
+    if (!queryStillCurrent(context)) return;
+    postTransferred(
+      {
+        ...envelope(),
+        ...identity,
+        fieldIds,
+        primaryFieldId: fieldIds[0] ?? null,
+        selectionLength,
+        selectionStart,
+        type: "packet_selection_resolved",
+      },
+      fieldIds,
+    );
+  } catch (error) {
+    if (context !== undefined && !queryStillCurrent(context)) return;
+    postPacketQueryError(identity, packetQueryError(error));
+  }
+}
+
 async function handleCommand(raw: unknown): Promise<void> {
   const candidate = asRecord(raw);
   const type = candidate?.type;
   const protocolVersion = candidate?.protocolVersion;
   const requestId = exactPositiveId(candidate?.requestId);
   const jobId = exactPositiveId(candidate?.jobId);
+  const datasetGeneration = exactPositiveId(candidate?.datasetGeneration);
+  const packetId = exactU32(candidate?.packetId);
 
   if (protocolVersion !== CAPTURE_INGESTION_PROTOCOL_VERSION) {
-    if (jobId !== undefined) {
+    if (
+      requestId !== undefined &&
+      datasetGeneration !== undefined &&
+      packetId !== undefined &&
+      (type === "read_packet_detail" ||
+        type === "read_packet_evidence_page" ||
+        type === "resolve_packet_selection")
+    ) {
+      postPacketQueryError(
+        { datasetGeneration, packetId, requestId },
+        { code: "unsupported_version" },
+      );
+    } else if (jobId !== undefined) {
       post({
         ...envelope(),
         error: { code: "unsupported_version" },
@@ -433,6 +697,42 @@ async function handleCommand(raw: unknown): Promise<void> {
     activeWork = runImport(job, candidate.file).finally(() => {
       if (activeWork !== undefined && activeJob === undefined) activeWork = undefined;
     });
+    return;
+  }
+
+  if (
+    requestId !== undefined &&
+    datasetGeneration !== undefined &&
+    packetId !== undefined &&
+    (type === "read_packet_detail" ||
+      type === "read_packet_evidence_page" ||
+      type === "resolve_packet_selection")
+  ) {
+    const identity = { datasetGeneration, packetId, requestId };
+    if (type === "read_packet_detail") {
+      const detailSchemaVersion = exactPositiveId(candidate?.detailSchemaVersion);
+      if (detailSchemaVersion === undefined) {
+        postPacketQueryError(identity, { code: "unsupported_version" });
+      } else {
+        startPacketQuery(identity, () => readPacketDetail(identity, detailSchemaVersion));
+      }
+      return;
+    }
+    if (type === "read_packet_evidence_page") {
+      const pageStart = exactU32(candidate?.pageStart);
+      if (pageStart === undefined) postPacketQueryError(identity, { code: "invalid_range" });
+      else startPacketQuery(identity, () => readPacketEvidencePage(identity, pageStart));
+      return;
+    }
+    const selectionStart = exactU32(candidate?.selectionStart);
+    const selectionLength = exactU32(candidate?.selectionLength);
+    if (selectionStart === undefined || selectionLength === undefined) {
+      postPacketQueryError(identity, { code: "invalid_range" });
+    } else {
+      startPacketQuery(identity, () =>
+        resolvePacketSelection(identity, selectionStart, selectionLength),
+      );
+    }
     return;
   }
 
@@ -481,6 +781,7 @@ async function handleCommand(raw: unknown): Promise<void> {
     if (activeJob !== undefined) activeJob.cancelRequested = true;
     try {
       await activeWork;
+      await Promise.all(activePacketQueries.values());
       await releaseDataset();
       await runtime.shutdown();
       post({ ...envelope(), requestId, type: "shutdown_complete" });

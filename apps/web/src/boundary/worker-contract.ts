@@ -46,6 +46,7 @@ export interface BoundaryWarning {
 export interface Capabilities {
   apiVersion: number;
   batchSchemaVersion: number;
+  detailSchemaVersion?: number;
   decodedArenaAdmissionRule?: string;
   decodedFieldAdmissionBase?: number;
   decodedFieldAdmissionBytesPerItem?: number;
@@ -60,6 +61,9 @@ export interface Capabilities {
   maxDecodedItemsPerStep: number;
   maxDiagnostics: number;
   maxEvidenceBytes: number;
+  maxCorrelationMatches?: number;
+  maxPacketDetailBytes?: number;
+  maxPacketEvidenceBytes?: number;
   maxFieldChildren?: number;
   maxFieldChildrenPerPacket?: number;
   maxFields?: number;
@@ -179,6 +183,27 @@ export type BoundaryRequest =
       operation: "read_evidence";
       startHi: number;
       startLo: number;
+    })
+  | (RequestBase & {
+      datasetHandle: bigint;
+      detailSchemaVersion: number;
+      maxBytes: number;
+      operation: "read_packet_detail";
+      packetId: number;
+    })
+  | (RequestBase & {
+      datasetHandle: bigint;
+      maxBytes: number;
+      operation: "read_packet_evidence";
+      packetId: number;
+      relativeStart: number;
+    })
+  | (RequestBase & {
+      datasetHandle: bigint;
+      length: number;
+      operation: "correlate_packet_range";
+      packetId: number;
+      relativeStart: number;
     })
   | (RequestBase & { operation: "resource_stats" })
   | (RequestBase & { operation: "wasm_memory_bytes" })

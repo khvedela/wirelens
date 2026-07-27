@@ -19,3 +19,7 @@ workspace = true
 [[bench]]
 name = "parser_ingest"
 harness = false
+
+[[bench]]
+name = "field_correlation"
+harness = false

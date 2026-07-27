@@ -1,7 +1,9 @@
 //! `wasm-bindgen` facade for the production module-worker boundary.
 
-use js_sys::{Array, ArrayBuffer, BigInt, Error, Object, Reflect, Uint8Array, Uint16Array};
-use packet_core::{DiagnosticScope, Recovery, Severity};
+use js_sys::{
+    Array, ArrayBuffer, BigInt, Error, Object, Reflect, Uint8Array, Uint16Array, Uint32Array,
+};
+use packet_core::{DiagnosticScope, PacketId, PacketRelativeRange, Recovery, Severity};
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
 use crate::{
@@ -17,8 +19,9 @@ use crate::{
     MAX_CAPTURE_LAYERS_PER_PACKET, MAX_CAPTURE_PACKETS, MAX_CAPTURE_SECTIONS,
     MAX_CAPTURE_STRING_BYTES, MAX_DATASET_HANDLES, MAX_EVIDENCE_BYTES, MAX_IMPORT_HANDLES,
     MAX_IMPORT_STEP_BYTES, MAX_IMPORT_STEP_RECORDS, MAX_PACKET_BATCH_BYTES, MAX_PACKET_BATCH_ROWS,
-    MAX_PACKET_CURSOR_HANDLES, MAX_TOTAL_CAPTURE_BYTES, MAX_TOTAL_LOGICAL_BYTES, ResourceStats,
-    boundary::allocate_import_copy_buffer,
+    MAX_PACKET_CORRELATION_MATCHES, MAX_PACKET_CURSOR_HANDLES, MAX_PACKET_DETAIL_BYTES,
+    MAX_PACKET_EVIDENCE_BYTES, MAX_TOTAL_CAPTURE_BYTES, MAX_TOTAL_LOGICAL_BYTES,
+    PACKET_DETAIL_SCHEMA_VERSION, ResourceStats, boundary::allocate_import_copy_buffer,
 };
 
 #[wasm_bindgen]
@@ -46,6 +49,12 @@ extern "C" {
 
     #[wasm_bindgen(catch, constructor, js_class = "Uint16Array")]
     fn try_new_u16_array_raw(length: u32) -> Result<CatchableUint16Array, JsValue>;
+
+    #[wasm_bindgen(js_name = Uint32Array)]
+    type CatchableUint32Array;
+
+    #[wasm_bindgen(catch, constructor, js_class = "Uint32Array")]
+    fn try_new_u32_array_raw(length: u32) -> Result<CatchableUint32Array, JsValue>;
 }
 
 fn allocation_error() -> JsValue {
@@ -73,6 +82,12 @@ fn try_new_u16_array(length: u32) -> Result<Uint16Array, JsValue> {
         .map_err(|_| allocation_error())
 }
 
+fn try_new_u32_array(length: u32) -> Result<Uint32Array, JsValue> {
+    CatchableUint32Array::try_new_u32_array_raw(length)
+        .map(JsCast::unchecked_into)
+        .map_err(|_| allocation_error())
+}
+
 fn copy_to_js_u8_array(bytes: &[u8]) -> Result<Uint8Array, JsValue> {
     let length = u32::try_from(bytes.len())
         .map_err(|_| web_error("resource_limit", "binary boundary output exceeds u32"))?;
@@ -95,6 +110,13 @@ pub fn api_version() -> u32 {
 #[must_use]
 pub fn batch_schema_version() -> u32 {
     u32::from(BATCH_SCHEMA_VERSION)
+}
+
+/// Returns the supported binary packet-detail schema version.
+#[wasm_bindgen(js_name = detailSchemaVersion)]
+#[must_use]
+pub fn detail_schema_version() -> u32 {
+    u32::from(PACKET_DETAIL_SCHEMA_VERSION)
 }
 
 fn capability_u64(value: u64) -> Result<f64, JsValue> {
@@ -128,6 +150,10 @@ fn set_core_capabilities(result: &Object) -> Result<(), JsValue> {
         &[
             ("apiVersion", f64::from(API_VERSION)),
             ("batchSchemaVersion", f64::from(BATCH_SCHEMA_VERSION)),
+            (
+                "detailSchemaVersion",
+                f64::from(PACKET_DETAIL_SCHEMA_VERSION),
+            ),
             ("maxCaptureBytes", capability_u64(MAX_CAPTURE_BYTES)?),
             (
                 "maxTotalCaptureBytes",
@@ -249,6 +275,18 @@ fn set_registry_and_output_capabilities(result: &Object) -> Result<(), JsValue> 
                 capability_usize(MAX_PACKET_BATCH_BYTES)?,
             ),
             ("maxPacketBatchRows", f64::from(MAX_PACKET_BATCH_ROWS)),
+            (
+                "maxPacketDetailBytes",
+                capability_usize(MAX_PACKET_DETAIL_BYTES)?,
+            ),
+            (
+                "maxPacketEvidenceBytes",
+                f64::from(MAX_PACKET_EVIDENCE_BYTES),
+            ),
+            (
+                "maxCorrelationMatches",
+                f64::from(MAX_PACKET_CORRELATION_MATCHES),
+            ),
         ],
     )
 }
@@ -497,6 +535,97 @@ impl WireLensBoundary {
                 next_row,
             )
             .map_err(boundary_error_to_js)
+    }
+
+    /// Returns one JavaScript-owned, transferable packet-detail batch.
+    #[wasm_bindgen(js_name = readPacketDetail)]
+    pub fn read_packet_detail(
+        &self,
+        raw_dataset: u64,
+        packet_id: f64,
+        detail_schema_version: f64,
+        max_bytes: f64,
+    ) -> Result<Uint8Array, JsValue> {
+        let packet_id = exact_u32(packet_id, "packet identity")?;
+        let schema_version = exact_u32(detail_schema_version, "packet detail schema version")?;
+        if schema_version != u32::from(PACKET_DETAIL_SCHEMA_VERSION) {
+            return Err(web_error(
+                "unsupported_version",
+                "packet detail schema version is unsupported",
+            ));
+        }
+        let max_bytes = exact_u32(max_bytes, "packet detail byte budget")?;
+        let detail = self
+            .state
+            .read_packet_detail(
+                BoundaryHandle::from_raw(raw_dataset),
+                PacketId(packet_id),
+                max_bytes,
+            )
+            .map_err(boundary_error_to_js)?;
+        copy_to_js_u8_array(detail.bytes())
+    }
+
+    /// Copies one checked packet-relative evidence page to JavaScript ownership.
+    #[wasm_bindgen(js_name = readPacketEvidence)]
+    pub fn read_packet_evidence(
+        &self,
+        raw_dataset: u64,
+        packet_id: f64,
+        relative_start: f64,
+        max_bytes: f64,
+    ) -> Result<Uint8Array, JsValue> {
+        let evidence = self
+            .state
+            .read_packet_evidence(
+                BoundaryHandle::from_raw(raw_dataset),
+                PacketId(exact_u32(packet_id, "packet identity")?),
+                exact_u32(relative_start, "packet-relative evidence start")?,
+                exact_u32(max_bytes, "packet evidence byte budget")?,
+            )
+            .map_err(boundary_error_to_js)?;
+        copy_to_js_u8_array(evidence.bytes())
+    }
+
+    /// Returns matching global field identities in deterministic primary-first order.
+    #[wasm_bindgen(js_name = correlatePacketRange)]
+    pub fn correlate_packet_range(
+        &self,
+        raw_dataset: u64,
+        packet_id: f64,
+        relative_start: f64,
+        length: f64,
+    ) -> Result<Uint32Array, JsValue> {
+        let packet_id = PacketId(exact_u32(packet_id, "packet identity")?);
+        let relative_start = exact_u32(relative_start, "packet-relative selection start")?;
+        let length = exact_u32(length, "packet-relative selection length")?;
+        let selection = PacketRelativeRange::new(relative_start, length).ok_or_else(|| {
+            web_error(
+                "invalid_argument",
+                "packet-relative selection range overflows",
+            )
+        })?;
+        let matches = self
+            .state
+            .correlate_packet_range(BoundaryHandle::from_raw(raw_dataset), packet_id, selection)
+            .map_err(boundary_error_to_js)?;
+        let length = u32::try_from(matches.matches().len()).map_err(|_| {
+            web_error(
+                "internal_invariant",
+                "packet correlation result exceeds its advertised limit",
+            )
+        })?;
+        let result = try_new_u32_array(length)?;
+        for (index, field) in matches.matches().iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| {
+                web_error(
+                    "internal_invariant",
+                    "packet correlation result index exceeds u32",
+                )
+            })?;
+            result.set_index(index, field.field_id.0);
+        }
+        Ok(result)
     }
 
     /// Copies one checked evidence range into a JavaScript-owned byte array.

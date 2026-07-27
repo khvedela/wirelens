@@ -491,6 +491,52 @@ fn decoded_fields_form_a_forward_hierarchy_with_byte_evidence() {
 }
 
 #[test]
+fn raw_byte_values_must_remain_inside_their_field_evidence() {
+    let mut parts = single_packet_parts(None);
+    parts.packets[0].layers = IndexRange::new(0, 1).expect("valid layer span");
+    parts.layers = vec![LayerFact {
+        protocol: StringId(1),
+        byte_range: range(40, 20),
+        root_field: Some(FieldId(0)),
+    }]
+    .into_boxed_slice();
+    parts.fields = vec![DecodedField {
+        name: StringId(0),
+        value: FieldValue::Bytes(range(48, 4)),
+        byte_range: range(40, 4),
+        children: IndexRange::default(),
+    }]
+    .into_boxed_slice();
+    parts.strings = ["field", "test"].map(Box::from).into();
+
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::ByteRange)
+    );
+}
+
+#[test]
+fn packet_diagnostic_evidence_must_remain_inside_its_packet() {
+    let mut parts = single_packet_parts(None);
+    parts.packets[0].diagnostics = IndexRange::new(0, 1).expect("diagnostic span");
+    parts.diagnostics = vec![Diagnostic {
+        code: DiagnosticCode::TRUNCATED_PROTOCOL,
+        severity: Severity::Warning,
+        scope: DiagnosticScope::Packet(PacketId(0)),
+        byte_range: Some(range(39, 1)),
+        message: StringId(0),
+        recovery: Recovery::Continued,
+    }]
+    .into_boxed_slice();
+    parts.strings = vec![Box::from("truncated protocol")].into_boxed_slice();
+
+    assert_eq!(
+        CaptureDataset::from_parts(parts),
+        Err(ModelError::ArenaOwnership)
+    );
+}
+
+#[test]
 fn million_packet_index_has_a_bounded_metadata_estimate() {
     // Raw capture bytes are the dominant allocation. Packet metadata stays a
     // fixed-width arena and does not allocate one object graph per packet.

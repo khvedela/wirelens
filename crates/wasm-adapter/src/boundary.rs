@@ -3,9 +3,10 @@
 use core::{fmt, mem};
 
 use packet_core::{
-    CaptureDataset, CaptureImporter, DecodedField, Diagnostic, FieldId, ImportError, ImportLimits,
-    ImportProgress as CoreImportProgress, ImportStep as CoreImportStep, InterfaceMetadata,
-    LayerFact, SectionMetadata, StringId, decoder_scratch_bytes_upper_bound,
+    CaptureDataset, CaptureImporter, CorrelationError, DecodedField, Diagnostic, FieldId,
+    ImportError, ImportLimits, ImportProgress as CoreImportProgress, ImportStep as CoreImportStep,
+    InterfaceMetadata, LayerFact, PacketFieldSelection, PacketId, PacketRelativeRange,
+    SectionMetadata, StringId, decoder_scratch_bytes_upper_bound,
 };
 use protocol_decoders::{
     DECODER_MAX_FIELD_CHILDREN_PER_PACKET, DECODER_MAX_FIELDS_PER_PACKET,
@@ -14,8 +15,11 @@ use protocol_decoders::{
 };
 
 use crate::{
-    BoundaryError, BoundaryErrorCode, BoundaryHandle, HandleKind, PacketBatch,
+    BoundaryError, BoundaryErrorCode, BoundaryHandle, HandleKind, PacketBatch, PacketDetailBatch,
     batch::{COLUMN_COUNT, encode_packet_batch, fitting_row_count},
+    detail::{
+        DETAIL_COLUMN_COUNT, DETAIL_DESCRIPTOR_BYTES, DETAIL_HEADER_BYTES, encode_packet_detail,
+    },
     handle::{DecodedHandle, MAX_GENERATION},
 };
 
@@ -27,6 +31,15 @@ pub const MAX_PACKET_BATCH_ROWS: u32 = 65_536;
 pub const MAX_PACKET_BATCH_BYTES: usize = 8 * 1024 * 1024;
 /// Smallest valid packet-batch envelope: header plus all descriptors.
 pub const MIN_PACKET_BATCH_BYTES: usize = 64 + COLUMN_COUNT * 24;
+/// Hard maximum bytes in one complete packet-detail response (512 KiB).
+pub const MAX_PACKET_DETAIL_BYTES: usize = 512 * 1024;
+/// Smallest valid packet-detail envelope: header plus all descriptors.
+pub const MIN_PACKET_DETAIL_BYTES: usize =
+    DETAIL_HEADER_BYTES + DETAIL_COLUMN_COUNT * DETAIL_DESCRIPTOR_BYTES;
+/// Maximum packet-relative raw evidence returned by one inspector request (4 KiB).
+pub const MAX_PACKET_EVIDENCE_BYTES: u32 = 4 * 1024;
+/// Maximum decoded-field identities returned by one correlation request.
+pub const MAX_PACKET_CORRELATION_MATCHES: u32 = MAX_CAPTURE_FIELDS_PER_PACKET;
 /// Maximum raw evidence bytes borrowed by one call (1 MiB).
 pub const MAX_EVIDENCE_BYTES: u32 = 1024 * 1024;
 /// Maximum simultaneously registered datasets.
@@ -836,6 +849,114 @@ impl BoundaryState {
         }))
     }
 
+    /// Encodes one complete, bounded packet-detail response.
+    ///
+    /// The response contains only relative layer and field descriptors plus a
+    /// compact referenced-string dictionary. Raw evidence bytes are requested
+    /// separately through [`Self::read_packet_evidence`].
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid dataset or packet identities, byte budgets outside the
+    /// supported envelope, packet trees above the advertised limits, and any
+    /// checked encoding or canonical-invariant failure.
+    pub fn read_packet_detail(
+        &self,
+        dataset: BoundaryHandle,
+        packet_id: PacketId,
+        requested_bytes: u32,
+    ) -> Result<PacketDetailBatch, BoundaryError> {
+        let requested_bytes = usize::try_from(requested_bytes).map_err(|_| arithmetic_error())?;
+        if !(MIN_PACKET_DETAIL_BYTES..=MAX_PACKET_DETAIL_BYTES).contains(&requested_bytes) {
+            return Err(BoundaryError::new(
+                BoundaryErrorCode::INVALID_ARGUMENT,
+                "packet detail byte budget is outside the supported range",
+            ));
+        }
+        encode_packet_detail(
+            self.datasets.get(dataset)?,
+            packet_id,
+            API_VERSION,
+            MAX_CAPTURE_LAYERS_PER_PACKET,
+            MAX_CAPTURE_FIELDS_PER_PACKET,
+            requested_bytes,
+        )
+    }
+
+    /// Borrows one bounded packet-relative evidence page.
+    ///
+    /// `relative_start == captured_length` is a valid empty page boundary.
+    /// The returned length is the smaller of `max_bytes` and the captured bytes
+    /// remaining after `relative_start`; missing wire bytes are never exposed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid dataset or packet identities, zero or oversized byte
+    /// budgets, packet-relative starts beyond captured bytes, and checked
+    /// offset failures.
+    pub fn read_packet_evidence(
+        &self,
+        dataset: BoundaryHandle,
+        packet_id: PacketId,
+        relative_start: u32,
+        max_bytes: u32,
+    ) -> Result<EvidenceView<'_>, BoundaryError> {
+        if max_bytes == 0 || max_bytes > MAX_PACKET_EVIDENCE_BYTES {
+            return Err(BoundaryError::new(
+                BoundaryErrorCode::INVALID_ARGUMENT,
+                "packet evidence byte budget is outside the supported range",
+            ));
+        }
+        let capture = self.datasets.get(dataset)?;
+        let packet = capture.packet(packet_id).ok_or_else(packet_not_found)?;
+        if relative_start > packet.captured_length {
+            return Err(BoundaryError::new(
+                BoundaryErrorCode::EVIDENCE_OUT_OF_RANGE,
+                "packet-relative evidence start is outside captured bytes",
+            ));
+        }
+        let length = max_bytes.min(packet.captured_length - relative_start);
+        let range = packet.data.child(relative_start, length).ok_or_else(|| {
+            BoundaryError::new(
+                BoundaryErrorCode::INTERNAL_INVARIANT,
+                "packet-relative evidence range contradicts canonical packet bytes",
+            )
+        })?;
+        let start = usize::try_from(range.start()).map_err(|_| arithmetic_error())?;
+        let end = usize::try_from(range.end()).map_err(|_| arithmetic_error())?;
+        let bytes = capture.bytes().get(start..end).ok_or_else(|| {
+            BoundaryError::new(
+                BoundaryErrorCode::INTERNAL_INVARIANT,
+                "packet-relative evidence range is outside canonical capture bytes",
+            )
+        })?;
+        Ok(EvidenceView {
+            offset: range.start(),
+            bytes,
+        })
+    }
+
+    /// Resolves one packet-relative range to every matching field.
+    ///
+    /// The platform-neutral resolver returns matches in deterministic
+    /// primary-first order and never emits more than the per-packet field cap.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid dataset or packet identities, out-of-bounds selections,
+    /// resource-limit failures, and canonical-invariant failures.
+    pub fn correlate_packet_range(
+        &self,
+        dataset: BoundaryHandle,
+        packet_id: PacketId,
+        selection: PacketRelativeRange,
+    ) -> Result<PacketFieldSelection, BoundaryError> {
+        self.datasets
+            .get(dataset)?
+            .correlate_packet_fields(packet_id, selection, MAX_PACKET_CORRELATION_MATCHES)
+            .map_err(correlation_error)
+    }
+
     /// Creates a packet cursor at an exact zero-based dataset row.
     ///
     /// # Errors
@@ -1567,6 +1688,34 @@ struct RemoveWherePlan {
 impl RemoveWherePlan {
     fn removed(&self) -> usize {
         self.matching.len()
+    }
+}
+
+fn packet_not_found() -> BoundaryError {
+    BoundaryError::new(
+        BoundaryErrorCode::INVALID_ARGUMENT,
+        "packet identity is outside the dataset",
+    )
+}
+
+fn correlation_error(error: CorrelationError) -> BoundaryError {
+    match error {
+        CorrelationError::PacketNotFound => packet_not_found(),
+        CorrelationError::SelectionOutOfBounds => BoundaryError::new(
+            BoundaryErrorCode::EVIDENCE_OUT_OF_RANGE,
+            "packet-relative selection is outside captured bytes",
+        ),
+        CorrelationError::FieldLimitExceeded | CorrelationError::AllocationFailed => {
+            BoundaryError::new(
+                BoundaryErrorCode::RESOURCE_LIMIT,
+                "packet correlation reached the decoded-field resource limit",
+            )
+            .with_resource_limit(u64::from(MAX_PACKET_CORRELATION_MATCHES))
+        }
+        CorrelationError::DatasetInvariant => BoundaryError::new(
+            BoundaryErrorCode::INTERNAL_INVARIANT,
+            "canonical packet field hierarchy is inconsistent",
+        ),
     }
 }
 

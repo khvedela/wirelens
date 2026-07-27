@@ -2,6 +2,7 @@ import type { BoundaryErrorCode, Capabilities, ResourceStats } from "../boundary
 import type { CaptureByteOrder, CaptureFormat } from "./capture-format";
 
 export const CAPTURE_INGESTION_PROTOCOL_VERSION = 1;
+export const PACKET_EVIDENCE_PAGE_BYTES = 4 * 1024;
 
 export type ImportErrorCode =
   | "empty_capture"
@@ -23,11 +24,21 @@ export interface ImportError {
 
 export interface IngestionCapabilities {
   maxCaptureBytes: number;
+  packetInspection?: PacketInspectionCapabilities;
   readChunkBytes: number;
   wasm: Pick<
     Capabilities,
     "apiVersion" | "maxImportStepBytes" | "maxImportStepRecords" | "maxPackets"
   >;
+}
+
+export interface PacketInspectionCapabilities {
+  detailSchemaVersion: number;
+  evidencePageBytes: number;
+  maxCorrelationMatches: number;
+  maxDetailBytes: number;
+  maxFieldsPerPacket: number;
+  maxLayersPerPacket: number;
 }
 
 export interface ReadProgress {
@@ -47,12 +58,43 @@ export interface ParseProgress {
 export interface ImportSummary {
   byteLength: number;
   byteOrder: CaptureByteOrder;
+  datasetGeneration?: number;
   filename: string;
   filenameHintMismatch: boolean;
   format: CaptureFormat;
   packetsRetained: number;
   records: number;
   warningCount: number;
+}
+
+export type PacketQueryErrorCode =
+  | "cancelled"
+  | "dataset_unavailable"
+  | "invalid_packet"
+  | "invalid_range"
+  | "resource_limit"
+  | "stale_dataset"
+  | "unsupported_version"
+  | "worker_failed";
+
+export interface PacketQueryError {
+  code: PacketQueryErrorCode;
+}
+
+export interface PacketEvidencePage {
+  bytes: Uint8Array;
+  datasetGeneration: number;
+  packetId: number;
+  pageStart: number;
+}
+
+export interface PacketSelectionResolution {
+  datasetGeneration: number;
+  fieldIds: Uint32Array;
+  packetId: number;
+  primaryFieldId: number | null;
+  selectionLength: number;
+  selectionStart: number;
 }
 
 export interface TerminalProgress {
@@ -70,6 +112,28 @@ export type CaptureWorkerCommand =
   | (ProtocolEnvelope & { jobId: number; type: "cancel_import" })
   | (ProtocolEnvelope & { requestId: number; type: "dispose_dataset" })
   | (ProtocolEnvelope & { requestId: number; type: "resource_stats" })
+  | (ProtocolEnvelope & {
+      datasetGeneration: number;
+      detailSchemaVersion: number;
+      packetId: number;
+      requestId: number;
+      type: "read_packet_detail";
+    })
+  | (ProtocolEnvelope & {
+      datasetGeneration: number;
+      packetId: number;
+      pageStart: number;
+      requestId: number;
+      type: "read_packet_evidence_page";
+    })
+  | (ProtocolEnvelope & {
+      datasetGeneration: number;
+      packetId: number;
+      requestId: number;
+      selectionLength: number;
+      selectionStart: number;
+      type: "resolve_packet_selection";
+    })
   | (ProtocolEnvelope & { requestId: number; type: "shutdown" });
 
 export type CaptureWorkerEvent =
@@ -110,6 +174,30 @@ export type CaptureWorkerEvent =
     } & TerminalProgress)
   | (ProtocolEnvelope & { requestId: number; type: "dataset_disposed" })
   | (ProtocolEnvelope & { requestId: number; stats: ResourceStats; type: "resource_stats" })
+  | (ProtocolEnvelope & {
+      bytes: Uint8Array;
+      datasetGeneration: number;
+      packetId: number;
+      requestId: number;
+      type: "packet_detail";
+    })
+  | (ProtocolEnvelope &
+      PacketEvidencePage & {
+        requestId: number;
+        type: "packet_evidence_page";
+      })
+  | (ProtocolEnvelope &
+      PacketSelectionResolution & {
+        requestId: number;
+        type: "packet_selection_resolved";
+      })
+  | (ProtocolEnvelope & {
+      datasetGeneration: number;
+      error: PacketQueryError;
+      packetId: number;
+      requestId: number;
+      type: "packet_query_error";
+    })
   | (ProtocolEnvelope & { requestId: number; type: "shutdown_complete" })
   | (ProtocolEnvelope & {
       error: ImportError;

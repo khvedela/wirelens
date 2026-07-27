@@ -67,6 +67,9 @@ This report is emitted only after the exact toolchain check, direct Cargo + \`wa
 | Packet batch | ${formatBytes(evidence.batch.byteLength)} | <= ${formatBytes(evidence.capabilities.maxPacketBatchBytes)} |
 | Packet-batch extraction + transfer | ${formatThroughput(evidence.batch.throughputMegabytesPerSecond)} | measured |
 | Evidence extraction + transfer | ${formatThroughput(evidence.evidenceTransfer.throughputMegabytesPerSecond)} | measured |
+| Packet detail extraction + transfer (${formatBytes(evidence.packetInspection.detail.byteLength)}, ${evidence.packetInspection.detail.samples} samples) | ${formatMilliseconds(evidence.packetInspection.detail.maximumDurationMs)} max | <= 200 ms |
+| Packet evidence-page extraction + transfer (${formatBytes(evidence.packetInspection.evidence.byteLength)}, ${evidence.packetInspection.evidence.samples} samples) | ${formatMilliseconds(evidence.packetInspection.evidence.maximumDurationMs)} max | <= 200 ms |
+| Packet correlation (${evidence.packetInspection.correlation.matches} matches, ${evidence.packetInspection.correlation.samples} samples) | ${formatMilliseconds(evidence.packetInspection.correlation.maximumDurationMs)} max | <= 200 ms |
 | Same-size success + binary-transfer Wasm high-water growth | ${formatBytes(repeatedWasmGrowth)} | 0 bytes |
 | Queued-cancellation Wasm high-water growth | ${formatBytes(cancellationWasmGrowth)} | 0 bytes |
 | Fatal resource-limit Wasm high-water growth | ${formatBytes(failureWasmGrowth)} | 0 bytes |
@@ -87,7 +90,10 @@ This is a source-inspected allocation model corroborated by runtime detachment c
 | After \`beginImport\` returns | ${evidence.copies.persistentFullInputAllocationsAfterBegin} full buffer | Resource stats report exactly ${formatBytes(evidence.dense.afterBegin.transientImportInputBytes)} Rust-owned input |
 | Rust packet batch -> worker JavaScript | ${evidence.copies.batchExtractionCopies} bounded copy | ${formatBytes(evidence.batch.byteLength)}, then source detached on transfer |
 | Rust evidence view -> worker JavaScript | ${evidence.copies.evidenceExtractionCopies} bounded copy | ${formatBytes(evidence.evidenceTransfer.byteLength)}, then source detached on transfer |
-| Worker -> main binary output | ${evidence.copies.workerOutputTransferCopies} structured-clone copies | Both transfer-detachment audits passed |
+| Rust packet detail -> worker JavaScript | 1 bounded copy per request | ${formatBytes(evidence.packetInspection.detail.byteLength)}, with every sampled source detached |
+| Rust packet evidence page -> worker JavaScript | 1 bounded copy per request | ${formatBytes(evidence.packetInspection.evidence.byteLength)}, with every sampled source detached |
+| Rust correlation IDs -> worker JavaScript | 1 bounded copy per request | ${evidence.packetInspection.correlation.matches} IDs, with every sampled source detached |
+| Worker -> main binary output | ${evidence.copies.workerOutputTransferCopies} structured-clone copies | All sampled transfer-detachment audits passed |
 
 The static contract verifier rejects whole-capture JSON/text conversion; \`wholeCaptureJson\` was ${evidence.copies.wholeCaptureJson}. Rust batches move out of the registry before copying to a JavaScript-owned transferable buffer, so retained batch bytes remained zero.
 
@@ -111,7 +117,7 @@ After dense disposal, ${evidence.cancellation.samplesMs.length} queued-cancellat
 - The page was cross-origin isolated and the Wasm ran in a production \`type: "module"\` worker.
 - The browser emitted ${evidence.runtimeAudit.errors.length} uncaught page, worker, or console errors during the complete evidence run.
 - The test blocked external requests and observed ${evidence.privacy.externalRequests} external requests, ${evidence.privacy.captureBearingRequests} non-GET/body-bearing requests, ${evidence.privacy.postReadyRequests} HTTP requests after the worker became ready, and ${evidence.privacy.webSockets} WebSocket channels. Because every import ran after that checkpoint, no audited HTTP or WebSocket path could carry capture bytes.
-- Main-to-worker input, worker-to-main batch, and worker-to-main evidence transfers all detached their source buffers. This confirms transfer/ownership semantics, not unobservable physical engine-copy behavior.
+- Main-to-worker input plus worker-to-main batch, capture evidence, packet detail, packet evidence-page, and correlation transfers all detached their source buffers. This confirms transfer/ownership semantics, not unobservable physical engine-copy behavior.
 - The independently implemented worker-side batch decoder validated the returned header, descriptors, alignment, ranges, row sequence, and evidence references before transfer. The main thread performed only the constant-work header and twelve-descriptor envelope check before commit.
 
 ## Memory sampling notes

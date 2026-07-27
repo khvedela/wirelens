@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import App from "../../App";
 import type { ResourceStats } from "../../boundary/worker-contract";
@@ -6,6 +6,7 @@ import {
   CaptureImportCancelledError,
   CaptureImportClient,
   CaptureImportClientError,
+  CapturePacketQueryError,
   type ImportProgressEvent,
 } from "../../ingestion/capture-client";
 import type { ImportSummary, IngestionCapabilities } from "../../ingestion/capture-contract";
@@ -57,6 +58,7 @@ export function CaptureImportController() {
   const cancellationGeneration = useRef<number | undefined>(undefined);
   const generation = useRef(0);
   const importInFlight = useRef(false);
+  const liveDatasetGeneration = useRef<number | undefined>(undefined);
   const maxCaptureBytes = useRef<number | undefined>(undefined);
   const workerFailed = useRef(false);
 
@@ -67,6 +69,7 @@ export function CaptureImportController() {
     generation.current = currentGeneration;
     cancellationGeneration.current = undefined;
     importInFlight.current = false;
+    liveDatasetGeneration.current = undefined;
     maxCaptureBytes.current = undefined;
     workerFailed.current = false;
     setModel(BOOTING_MODEL);
@@ -97,6 +100,7 @@ export function CaptureImportController() {
       generation.current += 1;
       cancellationGeneration.current = undefined;
       importInFlight.current = false;
+      liveDatasetGeneration.current = undefined;
       const ownedClient = client.current;
       client.current = undefined;
       delete window.__wirelensDiagnostics;
@@ -121,6 +125,7 @@ export function CaptureImportController() {
     if (generation.current !== expectedGeneration) return;
     cancellationGeneration.current = undefined;
     importInFlight.current = false;
+    liveDatasetGeneration.current = summary.datasetGeneration;
     setModel({
       maxCaptureBytes: maxCaptureBytes.current,
       phase: "complete",
@@ -132,6 +137,7 @@ export function CaptureImportController() {
     if (generation.current !== expectedGeneration) return;
     cancellationGeneration.current = undefined;
     importInFlight.current = false;
+    liveDatasetGeneration.current = undefined;
     const terminalProgress =
       error instanceof CaptureImportCancelledError || error instanceof CaptureImportClientError
         ? error.terminalProgress
@@ -178,6 +184,7 @@ export function CaptureImportController() {
       if (currentClient === undefined || importInFlight.current) return;
       importInFlight.current = true;
       cancellationGeneration.current = undefined;
+      liveDatasetGeneration.current = undefined;
       workerFailed.current = false;
       const expectedGeneration = generation.current + 1;
       generation.current = expectedGeneration;
@@ -215,6 +222,7 @@ export function CaptureImportController() {
     generation.current = expectedGeneration;
     cancellationGeneration.current = undefined;
     importInFlight.current = false;
+    liveDatasetGeneration.current = undefined;
     setModel({ phase: "booting" });
     void currentClient.disposeDataset().then(
       () => {
@@ -229,12 +237,54 @@ export function CaptureImportController() {
     );
   }, [initializeClient]);
 
+  const inspectionClient = useCallback((): {
+    client: CaptureImportClient;
+    datasetGeneration: number;
+  } => {
+    const currentClient = client.current;
+    const datasetGeneration = liveDatasetGeneration.current;
+    if (currentClient === undefined || datasetGeneration === undefined) {
+      throw new CapturePacketQueryError({ code: "dataset_unavailable" });
+    }
+    return { client: currentClient, datasetGeneration };
+  }, []);
+
+  const packetInspection = useMemo(
+    () => ({
+      loadDetail: (packetId: number, signal: AbortSignal) => {
+        const current = inspectionClient();
+        return current.client.readPacketDetail(current.datasetGeneration, packetId, signal);
+      },
+      loadEvidence: (packetId: number, pageStart: number, signal: AbortSignal) => {
+        const current = inspectionClient();
+        return current.client.readPacketEvidencePage(
+          current.datasetGeneration,
+          packetId,
+          pageStart,
+          signal,
+        );
+      },
+      resolveSelection: (packetId: number, start: number, length: number, signal: AbortSignal) => {
+        const current = inspectionClient();
+        return current.client.resolvePacketSelection(
+          current.datasetGeneration,
+          packetId,
+          start,
+          length,
+          signal,
+        );
+      },
+    }),
+    [inspectionClient],
+  );
+
   return (
     <App
       importModel={model}
       onCancelImport={onCancelImport}
       onFileSelected={onFileSelected}
       onResetImport={onResetImport}
+      packetInspection={packetInspection}
     />
   );
 }
