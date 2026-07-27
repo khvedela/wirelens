@@ -1154,34 +1154,34 @@ fn classify_flow_anomalies(accumulator: &FlowAnomalyAccumulator) -> Box<[FlowAno
             );
         }
 
-        if is_excessive_tcp_retransmission(tcp)
-            && let Some(retransmission) = classify_tcp_retransmission(tcp)
-        {
-            add_flow_anomaly(
-                &mut anomalies,
-                FlowAnomalyKind::ExcessiveRetransmission,
-                TcpHeuristicConfidence::Inferred,
-                "Observed repeated sequence-number reuse beyond minimal retransmission threshold.",
-                retransmission.packets,
-                &flow_limitations,
-            );
-        }
-
-        if let Some(handshake_latency) = tcp_handshake_duration(tcp)
-            && is_duration_excessive(handshake_latency)
-        {
-            if let (Some(first_syn), Some(final_ack)) = (tcp.first_syn, tcp.established_ack) {
+        if is_excessive_tcp_retransmission(tcp) {
+            if let Some(retransmission) = classify_tcp_retransmission(tcp) {
                 add_flow_anomaly(
                     &mut anomalies,
-                    FlowAnomalyKind::LongHandshake,
+                    FlowAnomalyKind::ExcessiveRetransmission,
                     TcpHeuristicConfidence::Inferred,
-                    "Observed a handshake completion interval that exceeds the heuristic threshold.",
-                    PacketPairEvidence {
-                        first: first_syn,
-                        second: Some(final_ack),
-                    },
+                    "Observed repeated sequence-number reuse beyond minimal retransmission threshold.",
+                    retransmission.packets,
                     &flow_limitations,
                 );
+            }
+        }
+
+        if let Some(handshake_latency) = tcp_handshake_duration(tcp) {
+            if is_duration_excessive(handshake_latency) {
+                if let (Some(first_syn), Some(final_ack)) = (tcp.first_syn, tcp.established_ack) {
+                    add_flow_anomaly(
+                        &mut anomalies,
+                        FlowAnomalyKind::LongHandshake,
+                        TcpHeuristicConfidence::Inferred,
+                        "Observed a handshake completion interval that exceeds the heuristic threshold.",
+                        PacketPairEvidence {
+                            first: first_syn,
+                            second: Some(final_ack),
+                        },
+                        &flow_limitations,
+                    );
+                }
             }
         }
     }
@@ -1610,9 +1610,10 @@ fn apply_tcp_packet_to_flow(
         && !tcp.rst
         && !tcp.ack
         && accumulator.first_data_timestamp.is_none()
-        && let Some(timestamp) = timestamp
     {
-        accumulator.first_data_timestamp = Some(timestamp);
+        if let Some(timestamp) = timestamp {
+            accumulator.first_data_timestamp = Some(timestamp);
+        }
     }
 
     if tcp.rst {
@@ -1992,17 +1993,17 @@ fn read_transport_ports(
 
         match field_name {
             "source_port" => {
-                if source_port.is_none()
-                    && let FieldValue::Unsigned(value) = field.value
-                {
-                    source_port = u16::try_from(value).ok();
+                if source_port.is_none() {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        source_port = u16::try_from(value).ok();
+                    }
                 }
             }
             "destination_port" => {
-                if destination_port.is_none()
-                    && let FieldValue::Unsigned(value) = field.value
-                {
-                    destination_port = u16::try_from(value).ok();
+                if destination_port.is_none() {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        destination_port = u16::try_from(value).ok();
+                    }
                 }
             }
             _ => {}
