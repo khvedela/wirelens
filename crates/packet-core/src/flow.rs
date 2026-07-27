@@ -1,4 +1,11 @@
 //! Bidirectional flow reconstruction for already-decoded protocol layers.
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::restriction,
+    clippy::nursery,
+    clippy::cargo
+)]
 
 use std::collections::BTreeMap;
 
@@ -6,6 +13,8 @@ use crate::{
     ByteRange, CaptureDataset, CaptureTimestamp, FieldId, FieldValue, IndexRange, InterfaceId,
     LayerFact, PacketId, PacketRecord, TimestampResolution,
 };
+
+use crate::DiagnosticCode;
 
 /// Identifier for one reconstructed flow.
 /// Stable duration measured in interface packet timestamps.
@@ -26,6 +35,73 @@ impl TcpFlowDuration {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FlowId(pub u32);
+
+const EXCESSIVE_RETRANSMISSION_THRESHOLD: u32 = 2;
+const LONG_HANDSHAKE_DURATION_SECONDS: u64 = 2;
+
+/// Packet-flow heuristic outcome classification details.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FlowAnomalyKind {
+    /// Flow start is observed but handshake completion was never seen.
+    SynWithoutResponse,
+    /// Same source endpoint sent repeated SYN packets without an intermediate SYN-ACK.
+    RepeatedSynAttempts,
+    /// TCP reset was observed before or after handshake completion.
+    ConnectionReset,
+    /// DNS response contained a non-zero response code.
+    DnsErrorResponse,
+    /// DNS request was observed with no matching in-slice response.
+    DnsRequestWithoutResponse,
+    /// Repeated sequence behavior is above a simple retransmission threshold.
+    ExcessiveRetransmission,
+    /// Handshake took longer than expected.
+    LongHandshake,
+    /// Flow was observed only from a single direction.
+    OneSidedCommunication,
+}
+
+/// Limitation affecting confidence and wording for heuristic conclusions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum FlowAnomalyLimitation {
+    /// Only one flow direction was visible.
+    OneSidedView,
+    /// Packet truncation in this flow could hide additional packets.
+    CaptureTruncated,
+    /// Timing could not be validated from complete timestamps.
+    MissingTiming,
+}
+
+/// A concrete, bounded flow-level anomaly finding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlowAnomaly {
+    /// Kind of finding.
+    pub kind: FlowAnomalyKind,
+    /// Confidence in the finding, adjusted for available evidence.
+    pub confidence: TcpHeuristicConfidence,
+    /// Human-readable observation that does not claim guaranteed root cause.
+    pub observation: &'static str,
+    /// Primary and supporting packet evidence.
+    pub evidence: PacketPairEvidence,
+    /// Limitations that prevent stronger certainty.
+    pub limitations: Box<[FlowAnomalyLimitation]>,
+}
+
+/// Anomaly catalog for one canonical flow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlowAnomalyCatalog {
+    /// Stable flow identity.
+    pub id: FlowId,
+    /// Capture interface owning this flow identity.
+    pub interface_id: InterfaceId,
+    /// Transport protocol for the flow.
+    pub protocol: TransportProtocol,
+    /// Canonical endpoint order (`endpoint_a` <= `endpoint_b`).
+    pub endpoint_a: FlowEndpoint,
+    /// Canonical endpoint order (`endpoint_b` >= `endpoint_a`).
+    pub endpoint_b: FlowEndpoint,
+    /// Sorted anomaly findings, with evidence and confidence adjustments.
+    pub anomalies: Box<[FlowAnomaly]>,
+}
 
 /// Supported transport protocols for flow reconstruction.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -79,6 +155,8 @@ struct FlowAccumulator {
     packets_from_b: u64,
     bytes_from_a: u64,
     bytes_from_b: u64,
+    first_packet: Option<PacketEvidence>,
+    last_packet: Option<PacketEvidence>,
     first_timestamp: Option<CaptureTimestamp>,
     last_timestamp: Option<CaptureTimestamp>,
 }
@@ -97,6 +175,7 @@ impl FlowAccumulator {
 struct TcpDirectionAccumulator {
     last_sequence: Option<u32>,
     last_sequence_packet: Option<PacketEvidence>,
+    retransmission_sequence_count: u32,
     last_ack: Option<u32>,
     last_ack_packet: Option<PacketEvidence>,
 }
@@ -159,6 +238,20 @@ struct FlowMetricAccumulator {
     tcp: Option<TcpFlowAccumulator>,
     first_dns_query: BTreeMap<u16, CaptureTimestamp>,
     dns_response_latency: Option<TcpFlowDuration>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DnsQueryEvidence {
+    packet: PacketEvidence,
+}
+
+#[derive(Debug, Default)]
+struct FlowAnomalyAccumulator {
+    packets: FlowAccumulator,
+    tcp: Option<TcpFlowAccumulator>,
+    dns_queries: BTreeMap<u16, DnsQueryEvidence>,
+    dns_error_responses: Vec<PacketPairEvidence>,
+    truncation_seen: bool,
 }
 
 /// Single packet evidence reference.
@@ -694,6 +787,46 @@ impl CaptureDataset {
         Ok(output.into_boxed_slice())
     }
 
+    /// Reconstructs a bounded, explainable anomaly catalog from reconstructed flow data.
+    ///
+    /// Anomalies are tied to packet evidence, include explicit confidence, and report
+    /// limitations that block stronger certainty claims.
+    ///
+    /// Ordering follows the same flow identity used by bidirectional flow reconstruction.
+    pub fn reconstruct_flow_anomaly_catalog(
+        &self,
+    ) -> Result<Box<[FlowAnomalyCatalog]>, FlowReconstructionError> {
+        let mut flows: BTreeMap<FlowKey, FlowAnomalyAccumulator> = BTreeMap::new();
+
+        for packet in self.packets() {
+            let Some((key, direction)) = packet_flow_key(self, packet)? else {
+                continue;
+            };
+            let tcp = read_tcp_packet_data(self, packet)?;
+            let dns = read_dns_packet_data(self, packet)?;
+            let accumulator = flows.entry(key).or_default();
+            apply_packet_to_anomaly_accumulator(self, accumulator, packet, direction, tcp, dns);
+        }
+
+        let mut output = Vec::new();
+        for (index, (key, accumulator)) in flows.into_iter().enumerate() {
+            let id = FlowId(
+                u32::try_from(index).map_err(|_| FlowReconstructionError::DatasetInvariant)?,
+            );
+            let anomalies = classify_flow_anomalies(&accumulator);
+            output.push(FlowAnomalyCatalog {
+                id,
+                interface_id: key.interface_id,
+                protocol: key.protocol,
+                endpoint_a: key.endpoint_a,
+                endpoint_b: key.endpoint_b,
+                anomalies,
+            });
+        }
+
+        Ok(output.into_boxed_slice())
+    }
+
     /// Reconstructs per-flow traffic and timing metrics from decoded fields.
     ///
     /// The returned list is deterministic and aligns with the same canonical flow key
@@ -852,7 +985,14 @@ fn apply_packet_to_flow(
     packet: &PacketRecord,
     direction: FlowDirection,
 ) {
+    let evidence = PacketEvidence {
+        packet_id: packet.id,
+    };
     let bytes = u64::from(packet.captured_length);
+    if accumulator.first_packet.is_none() {
+        accumulator.first_packet = Some(evidence);
+    }
+    accumulator.last_packet = Some(evidence);
     match direction {
         FlowDirection::AToB | FlowDirection::Unknown => {
             accumulator.packets_from_a = accumulator.packets_from_a.saturating_add(1);
@@ -885,6 +1025,267 @@ fn apply_packet_to_flow(
     }
 }
 
+fn packet_has_truncation_or_resource_error(
+    dataset: &CaptureDataset,
+    packet: &PacketRecord,
+) -> bool {
+    let Ok(diagnostic_start) = usize::try_from(packet.diagnostics.start()) else {
+        return false;
+    };
+    let Ok(diagnostic_end) = usize::try_from(packet.diagnostics.end()) else {
+        return false;
+    };
+    let diagnostics = match dataset.diagnostics().get(diagnostic_start..diagnostic_end) {
+        Some(diagnostics) => diagnostics,
+        None => return false,
+    };
+
+    diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            DiagnosticCode::TRUNCATED_RECORD | DiagnosticCode::TRUNCATED_PROTOCOL
+        )
+    })
+}
+
+fn apply_packet_to_anomaly_accumulator(
+    dataset: &CaptureDataset,
+    accumulator: &mut FlowAnomalyAccumulator,
+    packet: &PacketRecord,
+    direction: FlowDirection,
+    tcp: TcpPacketData,
+    dns: DnsPacketData,
+) {
+    apply_packet_to_flow(&mut accumulator.packets, packet, direction);
+    if packet_has_truncation_or_resource_error(dataset, packet) {
+        accumulator.truncation_seen = true;
+    }
+
+    if tcp.is_tcp {
+        let tcp_accumulator = accumulator
+            .tcp
+            .get_or_insert_with(TcpFlowAccumulator::default);
+        apply_tcp_packet_to_flow(tcp_accumulator, packet, direction, tcp);
+    }
+
+    if let Some(transaction_id) = dns.transaction_id {
+        let is_response = dns.is_response.unwrap_or(false);
+        let packet_evidence = PacketEvidence {
+            packet_id: packet.id,
+        };
+        if is_response {
+            if let Some(query) = accumulator.dns_queries.remove(&transaction_id) {
+                let response_code = dns.response_code.unwrap_or(0);
+                if response_code != 0 {
+                    accumulator.dns_error_responses.push(PacketPairEvidence {
+                        first: query.packet,
+                        second: Some(packet_evidence),
+                    });
+                }
+            } else if dns.response_code.unwrap_or(0) != 0 {
+                accumulator.dns_error_responses.push(PacketPairEvidence {
+                    first: packet_evidence,
+                    second: None,
+                });
+            }
+            return;
+        }
+
+        if dns.question_count.is_none_or(|count| count > 0) {
+            accumulator.dns_queries.insert(
+                transaction_id,
+                DnsQueryEvidence {
+                    packet: packet_evidence,
+                },
+            );
+        }
+    }
+}
+
+fn classify_flow_anomalies(accumulator: &FlowAnomalyAccumulator) -> Box<[FlowAnomaly]> {
+    let mut anomalies = Vec::new();
+
+    let mut flow_limitations = Vec::new();
+    if accumulator.packets.packets_from_a == 0 || accumulator.packets.packets_from_b == 0 {
+        flow_limitations.push(FlowAnomalyLimitation::OneSidedView);
+    }
+    if accumulator.truncation_seen {
+        flow_limitations.push(FlowAnomalyLimitation::CaptureTruncated);
+    }
+
+    if let Some(tcp) = accumulator.tcp.as_ref() {
+        if let Some(syn) = tcp.first_syn {
+            if tcp.syn_ack.is_none() && tcp.reset.is_none() {
+                add_flow_anomaly(
+                    &mut anomalies,
+                    FlowAnomalyKind::SynWithoutResponse,
+                    TcpHeuristicConfidence::Inferred,
+                    "Observed a TCP flow start without the expected SYN-ACK continuation.",
+                    PacketPairEvidence {
+                        first: syn,
+                        second: None,
+                    },
+                    &flow_limitations,
+                );
+            }
+            if let Some(repeated_syn) = tcp.repeated_syn {
+                add_flow_anomaly(
+                    &mut anomalies,
+                    FlowAnomalyKind::RepeatedSynAttempts,
+                    TcpHeuristicConfidence::Certain,
+                    "Observed repeated SYN attempts without handshake progress.",
+                    repeated_syn,
+                    &flow_limitations,
+                );
+            }
+        }
+
+        if let (Some(reset), Some(first_syn)) = (tcp.reset, tcp.first_syn) {
+            add_flow_anomaly(
+                &mut anomalies,
+                FlowAnomalyKind::ConnectionReset,
+                TcpHeuristicConfidence::Certain,
+                "Observed a TCP reset packet in this flow.",
+                PacketPairEvidence {
+                    first: first_syn,
+                    second: Some(reset),
+                },
+                &flow_limitations,
+            );
+        }
+
+        if is_excessive_tcp_retransmission(tcp) {
+            if let Some(retransmission) = classify_tcp_retransmission(tcp) {
+                add_flow_anomaly(
+                    &mut anomalies,
+                    FlowAnomalyKind::ExcessiveRetransmission,
+                    TcpHeuristicConfidence::Inferred,
+                    "Observed repeated sequence-number reuse beyond minimal retransmission threshold.",
+                    retransmission.packets,
+                    &flow_limitations,
+                );
+            }
+        }
+
+        if let Some(handshake_latency) = tcp_handshake_duration(tcp) {
+            if is_duration_excessive(handshake_latency) {
+                if let (Some(first_syn), Some(final_ack)) = (tcp.first_syn, tcp.established_ack) {
+                    add_flow_anomaly(
+                        &mut anomalies,
+                        FlowAnomalyKind::LongHandshake,
+                        TcpHeuristicConfidence::Inferred,
+                        "Observed a handshake completion interval that exceeds the heuristic threshold.",
+                        PacketPairEvidence {
+                            first: first_syn,
+                            second: Some(final_ack),
+                        },
+                        &flow_limitations,
+                    );
+                }
+            }
+        }
+    }
+
+    for response in &accumulator.dns_error_responses {
+        add_flow_anomaly(
+            &mut anomalies,
+            FlowAnomalyKind::DnsErrorResponse,
+            TcpHeuristicConfidence::Certain,
+            "Observed a DNS response with a failure response code.",
+            *response,
+            &flow_limitations,
+        );
+    }
+
+    for (_, query) in &accumulator.dns_queries {
+        add_flow_anomaly(
+            &mut anomalies,
+            FlowAnomalyKind::DnsRequestWithoutResponse,
+            TcpHeuristicConfidence::Inferred,
+            "Observed a DNS request without a matching response in the current capture slice.",
+            PacketPairEvidence {
+                first: query.packet,
+                second: None,
+            },
+            &flow_limitations,
+        );
+    }
+
+    if flow_limitations.contains(&FlowAnomalyLimitation::OneSidedView) {
+        if let Some(first_packet) = accumulator
+            .packets
+            .first_packet
+            .or(accumulator.packets.last_packet)
+        {
+            add_flow_anomaly(
+                &mut anomalies,
+                FlowAnomalyKind::OneSidedCommunication,
+                TcpHeuristicConfidence::Inferred,
+                "Packets are observed from only one endpoint for this flow.",
+                PacketPairEvidence {
+                    first: first_packet,
+                    second: None,
+                },
+                &flow_limitations,
+            );
+        }
+    }
+
+    anomalies.sort_unstable_by_key(|anomaly| anomaly.kind as u32);
+    anomalies.into_boxed_slice()
+}
+
+fn is_duration_excessive(duration: TcpFlowDuration) -> bool {
+    let tick_threshold = duration
+        .resolution
+        .ticks_per_second()
+        .map(|ticks| ticks.saturating_mul(LONG_HANDSHAKE_DURATION_SECONDS));
+    tick_threshold.is_some_and(|threshold| duration.ticks > threshold)
+}
+
+fn tcp_handshake_duration(tcp: &TcpFlowAccumulator) -> Option<TcpFlowDuration> {
+    tcp.first_syn_timestamp.and_then(|start| {
+        tcp.established_ack_timestamp
+            .and_then(|end| duration_from_timestamps(start, end))
+    })
+}
+
+fn is_excessive_tcp_retransmission(tcp: &TcpFlowAccumulator) -> bool {
+    tcp.direction_a.retransmission_sequence_count >= EXCESSIVE_RETRANSMISSION_THRESHOLD
+        || tcp.direction_b.retransmission_sequence_count >= EXCESSIVE_RETRANSMISSION_THRESHOLD
+}
+
+fn add_flow_anomaly(
+    anomalies: &mut Vec<FlowAnomaly>,
+    kind: FlowAnomalyKind,
+    mut confidence: TcpHeuristicConfidence,
+    observation: &'static str,
+    evidence: PacketPairEvidence,
+    limitations: &[FlowAnomalyLimitation],
+) {
+    let mut limitation_list: Vec<FlowAnomalyLimitation> = limitations.to_vec();
+    if let (TcpHeuristicConfidence::Certain, true) = (
+        confidence,
+        limitation_list.iter().any(|limitation| {
+            matches!(
+                limitation,
+                FlowAnomalyLimitation::OneSidedView | FlowAnomalyLimitation::CaptureTruncated
+            )
+        }),
+    ) {
+        confidence = TcpHeuristicConfidence::Inferred;
+    }
+
+    limitation_list.sort_unstable();
+    anomalies.push(FlowAnomaly {
+        kind,
+        confidence,
+        observation,
+        evidence,
+        limitations: limitation_list.into_boxed_slice(),
+    });
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TcpPacketData {
     is_tcp: bool,
@@ -900,6 +1301,7 @@ struct TcpPacketData {
 struct DnsPacketData {
     transaction_id: Option<u16>,
     is_response: Option<bool>,
+    response_code: Option<u16>,
     question_count: Option<u16>,
     answer_count: Option<u16>,
 }
@@ -1045,6 +1447,11 @@ fn read_dns_packet_data(
                         data.answer_count = u16::try_from(value).ok();
                     }
                 }
+                "response_code" => {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        data.response_code = u16::try_from(value).ok();
+                    }
+                }
                 _ => {}
             }
 
@@ -1121,6 +1528,11 @@ fn apply_tcp_packet_to_flow(
                             second: Some(evidence),
                         },
                     });
+                }
+                if last_seq == sequence {
+                    directional_state.retransmission_sequence_count = directional_state
+                        .retransmission_sequence_count
+                        .saturating_add(1);
                 } else if sequence < last_seq && accumulator.out_of_order.is_none() {
                     accumulator.out_of_order = Some(TcpDirectionalIndicator {
                         direction,
@@ -1198,9 +1610,10 @@ fn apply_tcp_packet_to_flow(
         && !tcp.rst
         && !tcp.ack
         && accumulator.first_data_timestamp.is_none()
-        && let Some(timestamp) = timestamp
     {
-        accumulator.first_data_timestamp = Some(timestamp);
+        if let Some(timestamp) = timestamp {
+            accumulator.first_data_timestamp = Some(timestamp);
+        }
     }
 
     if tcp.rst {
@@ -1580,17 +1993,17 @@ fn read_transport_ports(
 
         match field_name {
             "source_port" => {
-                if source_port.is_none()
-                    && let FieldValue::Unsigned(value) = field.value
-                {
-                    source_port = u16::try_from(value).ok();
+                if source_port.is_none() {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        source_port = u16::try_from(value).ok();
+                    }
                 }
             }
             "destination_port" => {
-                if destination_port.is_none()
-                    && let FieldValue::Unsigned(value) = field.value
-                {
-                    destination_port = u16::try_from(value).ok();
+                if destination_port.is_none() {
+                    if let FieldValue::Unsigned(value) = field.value {
+                        destination_port = u16::try_from(value).ok();
+                    }
                 }
             }
             _ => {}
@@ -1702,6 +2115,7 @@ mod tests {
     struct DnsPacketSpec {
         transaction_id: u16,
         is_response: bool,
+        response_code: u16,
         question_count: u16,
         answer_count: u16,
     }
@@ -1773,6 +2187,29 @@ mod tests {
 
     fn timestamps_bounds_with_dns(
         packets: &[PacketSpecWithDns],
+    ) -> (Option<CaptureTimestamp>, Option<CaptureTimestamp>) {
+        let mut earliest = None;
+        let mut latest = None;
+        for packet in packets {
+            let Some(timestamp) = packet.timestamp else {
+                continue;
+            };
+            if earliest
+                .is_none_or(|existing: CaptureTimestamp| existing.cmp_instant(timestamp).is_gt())
+            {
+                earliest = Some(timestamp);
+            }
+            if latest
+                .is_none_or(|existing: CaptureTimestamp| existing.cmp_instant(timestamp).is_lt())
+            {
+                latest = Some(timestamp);
+            }
+        }
+        (earliest, latest)
+    }
+
+    fn timestamps_bounds_with_diagnostics(
+        packets: &[PacketSpecWithDiagnostic],
     ) -> (Option<CaptureTimestamp>, Option<CaptureTimestamp>) {
         let mut earliest = None;
         let mut latest = None;
@@ -1982,6 +2419,7 @@ mod tests {
         dns: StringId,
         transaction_id: StringId,
         is_response: StringId,
+        response_code: StringId,
         question_count: StringId,
         answer_count: StringId,
     }
@@ -2015,6 +2453,13 @@ mod tests {
             byte_range: packet_range,
             children: IndexRange::default(),
         });
+        let response_code = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
+        fields.push(DecodedField {
+            name: ids.response_code,
+            value: FieldValue::Unsigned(u64::from(dns.response_code)),
+            byte_range: packet_range,
+            children: IndexRange::default(),
+        });
         let question_count = FieldId(u32::try_from(fields.len()).expect("field id fits u32"));
         fields.push(DecodedField {
             name: ids.question_count,
@@ -2033,6 +2478,7 @@ mod tests {
         let children_start = u32::try_from(field_children.len()).expect("children index fits u32");
         field_children.push(transaction_id);
         field_children.push(is_response);
+        field_children.push(response_code);
         field_children.push(question_count);
         field_children.push(answer_count);
         fields[root.0 as usize].children = IndexRange::new(
@@ -2265,6 +2711,7 @@ mod tests {
             "dns".into(),
             "transaction_id".into(),
             "is_response".into(),
+            "response_code".into(),
             "question_count".into(),
             "answer_count".into(),
         ];
@@ -2286,8 +2733,9 @@ mod tests {
             dns: StringId(14),
             transaction_id: StringId(15),
             is_response: StringId(16),
-            question_count: StringId(17),
-            answer_count: StringId(18),
+            response_code: StringId(17),
+            question_count: StringId(18),
+            answer_count: StringId(19),
         };
         let legacy_ids = StringIds {
             ipv4: ids.ipv4,
@@ -2451,6 +2899,236 @@ mod tests {
                 u32::try_from(bytes.len()).expect("section byte length fits u32"),
             )
             .expect("section range valid");
+        }
+        let byte_length = u64::try_from(bytes.len()).expect("byte length fits");
+        CaptureDataset::from_parts(CaptureDatasetParts {
+            metadata: CaptureMetadata {
+                format: CaptureFormat::Pcap,
+                byte_length,
+                packet_count: u64::try_from(packet_records.len()).expect("packet count fits"),
+                started_at,
+                ended_at,
+            },
+            bytes: bytes.into_boxed_slice(),
+            sections: sections.into_boxed_slice(),
+            interfaces: interfaces.into_boxed_slice(),
+            packets: packet_records.into_boxed_slice(),
+            layers: layers.into_boxed_slice(),
+            fields: fields.into_boxed_slice(),
+            field_children: field_children.into_boxed_slice(),
+            diagnostics: diagnostics.into_boxed_slice(),
+            strings: strings.into_boxed_slice(),
+        })
+        .expect("test dataset is valid")
+    }
+
+    #[derive(Clone, Copy)]
+    struct PacketSpecWithDiagnostic {
+        interface_id: InterfaceId,
+        timestamp: Option<CaptureTimestamp>,
+        network: NetworkSpec,
+        transport: Option<TransportSpec>,
+        tcp: Option<TcpPacketSpec>,
+        captured_length: u32,
+        diagnostic: Option<DiagnosticCode>,
+    }
+
+    fn build_dataset_with_diagnostics(packets: &[PacketSpecWithDiagnostic]) -> CaptureDataset {
+        let interface_count = packets
+            .iter()
+            .map(|packet| packet.interface_id.0)
+            .max()
+            .map_or(0, |id| id + 1);
+        let strings = vec![
+            "ipv4".into(),
+            "ipv6".into(),
+            "tcp".into(),
+            "udp".into(),
+            "source_address".into(),
+            "destination_address".into(),
+            "source_port".into(),
+            "destination_port".into(),
+            "sequence_number".into(),
+            "acknowledgment_number".into(),
+            "syn".into(),
+            "ack".into(),
+            "fin".into(),
+            "rst".into(),
+            "diag".into(),
+        ];
+        let ids = StringIds {
+            ipv4: StringId(0),
+            ipv6: StringId(1),
+            tcp: StringId(2),
+            udp: StringId(3),
+            source_address: StringId(4),
+            destination_address: StringId(5),
+            source_port: StringId(6),
+            destination_port: StringId(7),
+            sequence_number: StringId(8),
+            acknowledgment_number: StringId(9),
+            syn: StringId(10),
+            ack: StringId(11),
+            fin: StringId(12),
+            rst: StringId(13),
+        };
+
+        let mut sections = vec![crate::model::SectionMetadata {
+            id: crate::model::SectionId(0),
+            byte_range: ByteRange::new(0, 0).expect("placeholder section range"),
+            byte_order: ByteOrder::LittleEndian,
+            interfaces: IndexRange::new(0, interface_count).expect("interface span is valid"),
+        }];
+        let mut interfaces = Vec::new();
+        for index in 0..interface_count {
+            interfaces.push(InterfaceMetadata {
+                id: InterfaceId(index),
+                section_id: crate::model::SectionId(0),
+                byte_range: ByteRange::new(u64::from(index * 8), 8).expect("interface range valid"),
+                section_index: index,
+                link_type: LinkType(1),
+                snap_length: 65_535,
+                timestamp_resolution: TimestampResolution::Decimal(6),
+                name: None,
+            });
+        }
+
+        let mut bytes = Vec::new();
+        let mut packet_records = Vec::new();
+        let mut layers = Vec::new();
+        let mut fields = Vec::new();
+        let mut field_children = Vec::new();
+        let mut diagnostics = Vec::new();
+
+        for (index, packet) in packets.iter().enumerate() {
+            let payload_len = packet.captured_length.max(match packet.network {
+                NetworkSpec::V4(_, _) => 32,
+                NetworkSpec::V6(_, _) => 64,
+            });
+            let packet_start = u64::try_from(bytes.len()).expect("byte cursor fits");
+            bytes.resize(
+                bytes.len() + usize::try_from(payload_len).expect("payload len fits usize"),
+                0,
+            );
+
+            match packet.network {
+                NetworkSpec::V4(source, destination) => {
+                    let start = usize::try_from(packet_start).expect("start index fits");
+                    bytes[start..start + 4].copy_from_slice(&source);
+                    bytes[start + 4..start + 8].copy_from_slice(&destination);
+                }
+                NetworkSpec::V6(source, destination) => {
+                    let start = usize::try_from(packet_start).expect("start index fits");
+                    bytes[start..start + 16].copy_from_slice(&source);
+                    bytes[start + 16..start + 32].copy_from_slice(&destination);
+                }
+            }
+
+            let packet_range =
+                ByteRange::new(packet_start, payload_len).expect("packet range valid");
+            let layer_start = u32::try_from(layers.len()).expect("layer span fits u32");
+            match packet.network {
+                NetworkSpec::V4(..) => {
+                    let root = add_network_root(
+                        &mut fields,
+                        &mut field_children,
+                        packet_start,
+                        packet_range,
+                        packet.network,
+                        &ids,
+                        ids.ipv4,
+                    );
+                    layers.push(LayerFact {
+                        protocol: ids.ipv4,
+                        byte_range: packet_range,
+                        root_field: Some(root),
+                    });
+                }
+                NetworkSpec::V6(..) => {
+                    let root = add_network_root(
+                        &mut fields,
+                        &mut field_children,
+                        packet_start,
+                        packet_range,
+                        packet.network,
+                        &ids,
+                        ids.ipv6,
+                    );
+                    layers.push(LayerFact {
+                        protocol: ids.ipv6,
+                        byte_range: packet_range,
+                        root_field: Some(root),
+                    });
+                }
+            }
+
+            if let Some(transport) = packet.transport {
+                let (protocol, source_port, destination_port) = match transport {
+                    TransportSpec::Tcp(source_port, destination_port) => {
+                        (ids.tcp, source_port, destination_port)
+                    }
+                    TransportSpec::Udp(source_port, destination_port) => {
+                        (ids.udp, source_port, destination_port)
+                    }
+                };
+                let root = add_transport_root(
+                    &mut fields,
+                    &mut field_children,
+                    packet_range,
+                    protocol,
+                    &ids,
+                    source_port,
+                    destination_port,
+                    packet.tcp,
+                );
+                layers.push(LayerFact {
+                    protocol,
+                    byte_range: packet_range,
+                    root_field: Some(root),
+                });
+            }
+
+            let diagnostic_range = if let Some(code) = packet.diagnostic {
+                let diagnostic_start =
+                    u32::try_from(diagnostics.len()).expect("diagnostic start fits u32");
+                diagnostics.push(crate::Diagnostic {
+                    code,
+                    severity: crate::Severity::Warning,
+                    scope: crate::DiagnosticScope::Packet(PacketId(
+                        u32::try_from(index).expect("packet id fits"),
+                    )),
+                    byte_range: None,
+                    message: StringId(14),
+                    recovery: crate::Recovery::Continued,
+                });
+                let diagnostic_end =
+                    u32::try_from(diagnostics.len()).expect("diagnostic end fits u32");
+                IndexRange::new(diagnostic_start, diagnostic_end - diagnostic_start)
+                    .expect("diagnostic range valid")
+            } else {
+                IndexRange::default()
+            };
+
+            let layer_end = u32::try_from(layers.len()).expect("layer span fits u32");
+            packet_records.push(PacketRecord {
+                id: PacketId(u32::try_from(index).expect("packet id fits")),
+                section_id: crate::model::SectionId(0),
+                interface_id: packet.interface_id,
+                timestamp: packet.timestamp,
+                captured_length: payload_len,
+                original_length: payload_len,
+                data: packet_range,
+                layers: IndexRange::new(layer_start, layer_end - layer_start)
+                    .expect("packet layer span valid"),
+                diagnostics: diagnostic_range,
+            });
+        }
+
+        let (started_at, ended_at) = timestamps_bounds_with_diagnostics(packets);
+        if let Some(section) = sections.get_mut(0) {
+            section.byte_range =
+                ByteRange::new(0, u32::try_from(bytes.len()).expect("section range valid"))
+                    .expect("section range valid");
         }
         let byte_length = u64::try_from(bytes.len()).expect("byte length fits");
         CaptureDataset::from_parts(CaptureDatasetParts {
@@ -3130,6 +3808,7 @@ mod tests {
                 dns: Some(DnsPacketSpec {
                     transaction_id: 0x1234,
                     is_response: false,
+                    response_code: 0,
                     question_count: 1,
                     answer_count: 0,
                 }),
@@ -3144,6 +3823,7 @@ mod tests {
                 dns: Some(DnsPacketSpec {
                     transaction_id: 0x1234,
                     is_response: true,
+                    response_code: 0,
                     question_count: 0,
                     answer_count: 1,
                 }),
@@ -3160,6 +3840,442 @@ mod tests {
                 ticks: 250_000,
                 resolution: TimestampResolution::Decimal(6),
             })
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_syn_without_response() {
+        let dataset = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(100),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(2, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(200),
+                    acknowledgment_number: Some(101),
+                    syn: false,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+        ]);
+        let anomalies = dataset
+            .reconstruct_flow_anomaly_catalog()
+            .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].anomalies.len(), 1);
+        assert_eq!(
+            anomalies[0].anomalies[0].kind,
+            FlowAnomalyKind::SynWithoutResponse
+        );
+        assert_eq!(
+            anomalies[0].anomalies[0].confidence,
+            TcpHeuristicConfidence::Inferred
+        );
+        assert_eq!(
+            anomalies[0].anomalies[0].evidence.first.packet_id,
+            PacketId(0)
+        );
+        assert_eq!(anomalies[0].anomalies[0].evidence.second, None);
+        assert!(anomalies[0].anomalies[0].limitations.is_empty());
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_repeated_syn_attempts() {
+        let dataset = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(101),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 250_000)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(101),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 500_000)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(200),
+                    acknowledgment_number: Some(102),
+                    syn: true,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+        ]);
+        let catalog = dataset
+            .reconstruct_flow_anomaly_catalog()
+            .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].anomalies.len(), 1);
+        assert_eq!(
+            catalog[0].anomalies[0].kind,
+            FlowAnomalyKind::RepeatedSynAttempts
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_connection_reset() {
+        let dataset = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(1, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(1),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(2, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(2_000),
+                    acknowledgment_number: Some(2),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: true,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+        ]);
+        let catalog = dataset
+            .reconstruct_flow_anomaly_catalog()
+            .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(
+            catalog[0].anomalies[0].kind,
+            FlowAnomalyKind::ConnectionReset
+        );
+        assert_eq!(
+            catalog[0].anomalies[0].evidence.first.packet_id,
+            PacketId(0)
+        );
+        assert_eq!(
+            catalog[0].anomalies[0].evidence.second,
+            Some(PacketEvidence {
+                packet_id: PacketId(1)
+            })
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_long_handshake() {
+        let dataset = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(10, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(10),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(11, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(20),
+                    acknowledgment_number: Some(11),
+                    syn: true,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(14, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(11),
+                    acknowledgment_number: Some(21),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+        ]);
+        let catalog = dataset
+            .reconstruct_flow_anomaly_catalog()
+            .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].anomalies.len(), 1);
+        assert_eq!(catalog[0].anomalies[0].kind, FlowAnomalyKind::LongHandshake);
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_excessive_retransmission() {
+        let dataset = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(10, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(3_000),
+                    acknowledgment_number: None,
+                    syn: false,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(10, 250_000)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(3_000),
+                    acknowledgment_number: None,
+                    syn: false,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(10, 500_000)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(3_000),
+                    acknowledgment_number: None,
+                    syn: false,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(11, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(4_000),
+                    acknowledgment_number: Some(3_001),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+        ]);
+        let catalog = dataset
+            .reconstruct_flow_anomaly_catalog()
+            .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(
+            catalog[0].anomalies[0].kind,
+            FlowAnomalyKind::ExcessiveRetransmission
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_reports_dns_errors_and_missing_dns_responses() {
+        let catalog = {
+            let dataset = build_dataset_with_dns(&[
+                PacketSpecWithDns {
+                    interface_id: InterfaceId(0),
+                    timestamp: Some(timestamp(10, 0)),
+                    network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 53]),
+                    transport: Some(TransportSpec::Udp(53_001, 53)),
+                    tcp: None,
+                    dns: Some(DnsPacketSpec {
+                        transaction_id: 0x1234,
+                        is_response: false,
+                        response_code: 0,
+                        question_count: 1,
+                        answer_count: 0,
+                    }),
+                    captured_length: 32,
+                },
+                PacketSpecWithDns {
+                    interface_id: InterfaceId(0),
+                    timestamp: Some(timestamp(10, 250_000)),
+                    network: NetworkSpec::V4([10, 0, 0, 53], [10, 0, 0, 1]),
+                    transport: Some(TransportSpec::Udp(53, 53_001)),
+                    tcp: None,
+                    dns: Some(DnsPacketSpec {
+                        transaction_id: 0x1234,
+                        is_response: true,
+                        response_code: 2,
+                        question_count: 0,
+                        answer_count: 0,
+                    }),
+                    captured_length: 32,
+                },
+                PacketSpecWithDns {
+                    interface_id: InterfaceId(0),
+                    timestamp: Some(timestamp(11, 0)),
+                    network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 53]),
+                    transport: Some(TransportSpec::Udp(53_001, 53)),
+                    tcp: None,
+                    dns: Some(DnsPacketSpec {
+                        transaction_id: 0x2222,
+                        is_response: false,
+                        response_code: 0,
+                        question_count: 1,
+                        answer_count: 0,
+                    }),
+                    captured_length: 32,
+                },
+            ]);
+            dataset
+                .reconstruct_flow_anomaly_catalog()
+                .expect("anomaly catalog reconstruction succeeds")
+        };
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(
+            catalog[0]
+                .anomalies
+                .iter()
+                .map(|anomaly| anomaly.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FlowAnomalyKind::DnsErrorResponse,
+                FlowAnomalyKind::DnsRequestWithoutResponse
+            ]
+        );
+    }
+
+    #[test]
+    fn reconstruct_flow_anomaly_catalog_degrades_confidence_under_truncation() {
+        let catalog = build_dataset_with_diagnostics(&[
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(4, 0)),
+                network: NetworkSpec::V4([10, 0, 0, 1], [10, 0, 0, 2]),
+                transport: Some(TransportSpec::Tcp(5_001, 80)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(10),
+                    acknowledgment_number: None,
+                    syn: true,
+                    ack: false,
+                    fin: false,
+                    rst: false,
+                }),
+                captured_length: 32,
+                diagnostic: None,
+            },
+            PacketSpecWithDiagnostic {
+                interface_id: InterfaceId(0),
+                timestamp: Some(timestamp(4, 200_000)),
+                network: NetworkSpec::V4([10, 0, 0, 2], [10, 0, 0, 1]),
+                transport: Some(TransportSpec::Tcp(80, 5_001)),
+                tcp: Some(TcpPacketSpec {
+                    sequence_number: Some(100),
+                    acknowledgment_number: Some(11),
+                    syn: false,
+                    ack: true,
+                    fin: false,
+                    rst: true,
+                }),
+                captured_length: 32,
+                diagnostic: Some(DiagnosticCode::TRUNCATED_RECORD),
+            },
+        ])
+        .reconstruct_flow_anomaly_catalog()
+        .expect("anomaly catalog reconstruction succeeds");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].anomalies.len(), 1);
+        assert_eq!(
+            catalog[0].anomalies[0].kind,
+            FlowAnomalyKind::ConnectionReset
+        );
+        assert_eq!(
+            catalog[0].anomalies[0].confidence,
+            TcpHeuristicConfidence::Inferred
+        );
+        assert_eq!(
+            catalog[0].anomalies[0].limitations.as_ref(),
+            &[FlowAnomalyLimitation::CaptureTruncated]
         );
     }
 

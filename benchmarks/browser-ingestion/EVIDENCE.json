@@ -17,14 +17,14 @@
     "transientParserBufferBytesUpperBound": "0"
   },
   "cancellationLatenciesMs": [
-    4.534999996423721,
-    6.685000002384186,
-    8.359999999403954,
-    4.795000001788139,
-    5.159999996423721,
-    7.060000002384186
+    3.2349999994039536,
+    6.594999998807907,
+    10.310000002384186,
+    6.199999988079071,
+    7.034999996423721,
+    6.329999998211861
   ],
-  "cancellationMedianMs": 5.9224999994039536,
+  "cancellationMedianMs": 6.462499998509884,
   "cancellationPhases": [
     "reading",
     "parsing",
@@ -33,7 +33,7 @@
     "reading",
     "parsing"
   ],
-  "effectiveThroughputMibPerSecond": 294.0750564495405,
+  "effectiveThroughputMibPerSecond": 293.6764323202888,
   "environment": {
     "architecture": "arm64",
     "cpu": "Apple M3 Pro",
@@ -43,7 +43,7 @@
   },
   "fixture": {
     "exactBytes": 250613512,
-    "manifestSha256": "e1aa31de024f9016fc4d5d936f9609a7df37e37760a1c3c3cdefb439a60cea65",
+    "manifestSha256": "4519224de45927eab70f88a76f2761772835f679014cbaefef7ab28a98bc1330",
     "recipe": {
       "kind": "supported-large-pcap",
       "payloadBytes": 1048576,
@@ -51,14 +51,14 @@
     },
     "targetBytes": 251658240
   },
-  "heartbeatTicks": 209,
-  "importElapsedMs": 812.7301670000002,
+  "heartbeatTicks": 197,
+  "importElapsedMs": 813.8333329999998,
   "longTasksOver50Ms": [],
   "memory": {
-    "attributablePeakBytes": 255068188,
-    "attributablePeakRatio": 1.017775083092886,
-    "baselineBytes": 4226170,
-    "finalBytes": 256454036,
+    "attributablePeakBytes": 255823134,
+    "attributablePeakRatio": 1.0207874745396808,
+    "baselineBytes": 3927982,
+    "finalBytes": 259751116,
     "modeledEnvelope": {
       "admittedReadChunkBytes": 4194304,
       "bytes": 505421328,
@@ -67,40 +67,40 @@
       "readAssemblyPeakBytes": 254807816,
       "synchronousCopyPeakBytes": 505421328
     },
-    "peakBytes": 259294358,
+    "peakBytes": 259751116,
     "sampleCount": 31,
     "samples": [
-      3739263,
-      258691808,
-      259294358,
-      258959377,
-      258966147,
-      258916502,
-      258973426,
-      259084117,
-      256602786,
-      255994686,
-      255938315,
-      256388863,
-      256018678,
-      256020814,
-      256012837,
-      256503645,
-      256076342,
-      256015018,
-      256035593,
-      256042074,
-      256037938,
-      256458550,
-      256069222,
-      256697893,
-      256079598,
-      256067569,
-      256012291,
-      256101175,
-      256189746,
-      256148325,
-      256188148
+      3888966,
+      258987853,
+      259171923,
+      259530609,
+      259233661,
+      259154419,
+      259158797,
+      256321379,
+      256315511,
+      256217363,
+      256278989,
+      256278934,
+      256294257,
+      256312381,
+      256316413,
+      256322207,
+      256406293,
+      256286113,
+      256314096,
+      256322052,
+      256329633,
+      256312435,
+      256426345,
+      256327205,
+      256340372,
+      256347151,
+      259021701,
+      258825411,
+      259102779,
+      258822473,
+      259556885
     ]
   },
   "privacy": {
@@ -109,7 +109,7 @@
     "runtimeErrors": 0,
     "webSockets": 0
   },
-  "recordedAt": "2026-07-27T02:02:33.444Z",
+  "recordedAt": "2026-07-27T21:06:08.263Z",
   "qualifyingProfile": true,
   "resetResources": {
     "currentOwnedCaptureBytes": "0",
@@ -144,8 +144,8 @@
     "transientParserBufferBytesUpperBound": "0"
   },
   "source": {
-    "baseRevision": "a4c0b9d9c98c38bf3dc521a3bec7c0be2c67c92d",
-    "sha256": "af09cf8a2094577db6fa358e13b71e89be0e4ab5b670df9f0e2fddebe9413c7e"
+    "baseRevision": "625b695bb9e980f4dbac41248e125cb667a60844",
+    "sha256": "c72250e51308c885f69127e1a9d8bb37b1088c92bb49f5519d37eea4edd17327"
   },
   "workerToMainBinaryBytes": 0
 }

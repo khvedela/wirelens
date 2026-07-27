@@ -21,7 +21,8 @@ pub use correlation::{
 pub use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticScope, Recovery, Severity};
 pub use field::{DecodedField, FieldId, FieldValue, LayerFact, StringId};
 pub use flow::{
-    BidirectionalFlow, FlowDirection, FlowId, FlowMetrics, FlowReconstructionError, PacketEvidence,
+    BidirectionalFlow, FlowAnomaly, FlowAnomalyCatalog, FlowAnomalyKind, FlowAnomalyLimitation,
+    FlowDirection, FlowId, FlowMetrics, FlowReconstructionError, PacketEvidence,
     PacketPairEvidence, PacketSequenceAggregate, PacketSequenceFlags, PacketSequenceLane,
     PacketSequenceMessage, PacketSequenceTimeline, PacketSequenceTimelineEntry,
     PacketSizeDistribution, TcpConnectionEstablishment, TcpConnectionFailureCause,
